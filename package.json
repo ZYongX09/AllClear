@@ -1,0 +1,14 @@
+{
+  "name": "allclear",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Status page and basic availability monitor for Cloudflare's serverless platform",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "npm --prefix apps/web run build && npm --prefix apps/api run build",
+    "test": "npm --prefix packages/shared test",
+    "typecheck": "npm --prefix packages/shared run typecheck && npm --prefix apps/api run typecheck && npm --prefix apps/web run typecheck"
+  },
+  "comment": "Deliberately NOT an npm workspaces monorepo. Each package installs its own dependencies. M0 exists to validate the vinext/Workers deployment path, and hoisting the beta vinext + @cloudflare/vite-plugin dependency tree would add an unrelated variable. Revisit after M0."
+}
