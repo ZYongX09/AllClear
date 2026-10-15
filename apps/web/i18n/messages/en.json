@@ -1,0 +1,25 @@
+{
+  "ui": {
+    "title": "allclear · UI capability check",
+    "intro": "This page exists to prove that next-intl, Radix primitives, shadcn-style components and theme switching build and run together on vinext.",
+    "localeHeading": "Locale",
+    "localeValue": "Active locale: {locale}",
+    "localeSwitch": "Switch to 简体中文",
+    "themeHeading": "Theme",
+    "themeToggle": "Theme",
+    "themeLight": "Light",
+    "themeDark": "Dark",
+    "themeSystem": "System",
+    "themeCurrent": "Resolved theme: {theme}",
+    "radixHeading": "Radix primitive",
+    "radixHint": "Open the menu below. It is a real Radix DropdownMenu with a portal, focus trap and keyboard navigation.",
+    "radixOpen": "Open menu",
+    "radixItemOne": "First item",
+    "radixItemTwo": "Second item",
+    "radixSeparator": "Separator follows",
+    "radixDisabled": "Disabled item",
+    "serverHeading": "Server-side translation",
+    "serverText": "This sentence was translated on the server by getTranslations, not in the browser.",
+    "count": "{n, plural, =0 {No components} one {# component} other {# components}}"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "allclear-api",
+  "private": true,
+  "version": "0.0.0",
+  "description": "allclear API Worker: public read API, internal admin API, probe scheduler",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "wrangler types && tsc --noEmit",
+    "db:apply": "wrangler d1 execute allclear-db --remote --file migrations/0001_init.sql"
+  },
+  "dependencies": {
+    "hono": "^4.9.0"
+  },
+  "devDependencies": {
+    "typescript": "latest",
+    "wrangler": "^4.88.0"
+  }
+}

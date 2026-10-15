@@ -1,0 +1,25 @@
+{
+  "ui": {
+    "title": "allclear · 界面能力检查",
+    "intro": "本页用于证明 next-intl、Radix 原语、shadcn 风格组件与主题切换能在 vinext 上一起构建并运行。",
+    "localeHeading": "语言",
+    "localeValue": "当前语言：{locale}",
+    "localeSwitch": "Switch to English",
+    "themeHeading": "主题",
+    "themeToggle": "主题",
+    "themeLight": "浅色",
+    "themeDark": "深色",
+    "themeSystem": "跟随系统",
+    "themeCurrent": "当前生效主题：{theme}",
+    "radixHeading": "Radix 原语",
+    "radixHint": "打开下方菜单。它是真正的 Radix DropdownMenu，带 portal、焦点陷阱与键盘导航。",
+    "radixOpen": "打开菜单",
+    "radixItemOne": "第一项",
+    "radixItemTwo": "第二项",
+    "radixSeparator": "下面有分隔线",
+    "radixDisabled": "禁用项",
+    "serverHeading": "服务端翻译",
+    "serverText": "这句话由服务端的 getTranslations 翻译，而不是在浏览器里。",
+    "count": "{n, plural, =0 {没有组件} other {# 个组件}}"
+  }
+}

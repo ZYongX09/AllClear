@@ -1,13 +1,21 @@
 {
-	"name": "web",
+	"name": "allclear-web",
 	"version": "0.1.0",
 	"private": true,
 	"packageManager": "npm@12.2.0",
 	"dependencies": {
+		"@radix-ui/react-dropdown-menu": "^2.2.1",
+		"@radix-ui/react-slot": "^1.5.0",
 		"@vinext/cloudflare": "latest",
+		"class-variance-authority": "^0.7.1",
+		"clsx": "^2.1.1",
+		"lucide-react": "^1.57.0",
+		"next-intl": "^4.14.9",
+		"next-themes": "^0.4.6",
 		"react": "latest",
 		"react-dom": "latest",
 		"react-server-dom-webpack": "latest",
+		"tailwind-merge": "^3.7.0",
 		"vinext": "latest"
 	},
 	"devDependencies": {
@@ -21,7 +29,8 @@
 		"cf": "^1.0.0-beta.17",
 		"tailwindcss": "latest",
 		"typescript": "latest",
-		"vite": "8.3.0"
+		"vite": "8.3.0",
+		"wrangler": "^4.88.0"
 	},
 	"type": "module",
 	"scripts": {
@@ -30,6 +39,6 @@
 		"start": "vite preview",
 		"deploy": "vinext-cloudflare deploy",
 		"preview": "npm run build && npm run start --",
-		"cf-typegen": "cf workers types"
+		"typecheck": "cf workers types && tsc --noEmit"
 	}
 }

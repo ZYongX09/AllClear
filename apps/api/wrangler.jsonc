@@ -1,0 +1,52 @@
+{
+  // Wrangler config, not the `cf` typed config (`cloudflare.config.ts`).
+  //
+  // vinext and `cf` both support a typed `cloudflare.config.ts`, and that is
+  // what `npm create cloudflare` scaffolds today. It is not used here because
+  // `cf` resolves credentials only from CLOUDFLARE_API_TOKEN or its own OAuth
+  // profile (`cf auth login`) — it does not reuse the Wrangler OAuth session
+  // that CI and most existing checkouts already have. The Wrangler route
+  // deploys with credentials that already exist. See docs/spec/m0-findings.md.
+  //
+  // `account_id` is deliberately absent: this repository is published for
+  // others, so the account is supplied per environment via CLOUDFLARE_ACCOUNT_ID.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "allclear-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-15",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // The API Worker has no public route. It is reachable only through the
+  // Service Binding declared by the web Worker. This is the primary boundary;
+  // INTERNAL_KEY (a secret, set with `wrangler secret put`) is a second,
+  // independent check, because reachability through a Service Binding is not
+  // authorisation.
+  "workers_dev": false,
+  "observability": { "enabled": true },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "allclear-db",
+      "database_id": "81f85a9d-9aae-4c7c-94a8-a84a812b1c51"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "SNAPSHOT_KV",
+      "id": "c0ef8e657cbe47a6a6e9e72a5df41581"
+    }
+  ],
+
+  // M0 scaffolding. Rebuilds snapshots whose KV payload has fallen behind
+  // `page.snapshot_version`. The real prober scheduler lands in M3.
+  "triggers": { "crons": ["* * * * *"] },
+
+  "vars": {
+    // M0 scaffolding, not part of the design. Set to "d1_read_failure" to make
+    // every D1 statement in the read path throw, so that "D1 down, the public
+    // page still serves the last snapshot" can be demonstrated on a real
+    // deployment. Any other value is inert. Remove in M1.
+    "M0_SIMULATE_D1_FAILURE": "none"
+  }
+}

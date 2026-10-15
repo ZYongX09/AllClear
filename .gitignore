@@ -8,6 +8,13 @@ dist/
 .cloudflare/
 build/
 
+# generated Worker runtime types — `wrangler types` (run by `npm run typecheck`)
+# regenerates this. Committing it adds ~16k lines of generated declarations and
+# trips the security scanner on standard method signatures such as
+# URLPattern.exec(), Container.exec() and D1Database.exec(), which are
+# declarations rather than executable code.
+apps/api/worker-configuration.d.ts
+
 # env & secrets — never commit these
 .env
 .env.*
@@ -28,3 +35,6 @@ npm-debug.log*
 # local test artifacts
 coverage/
 *.tsbuildinfo
+
+# per-session tool state (security-scan hook bookkeeping) — machine local
+.mimosa/
