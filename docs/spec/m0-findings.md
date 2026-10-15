@@ -194,6 +194,14 @@ No patching of `next-intl` is required, and `next.config.ts` is not involved.
 - **Server-side secrets stay out of the RSC payload.** `INTERNAL_KEY` is read
   inside the action body via `env` from `cloudflare:workers`, so it is never
   serialised to the browser.
+- **`wrangler types` is run with `--include-runtime=false`.** The default output
+  bundles the whole workerd runtime declaration set (~16k lines) alongside the
+  `Env` interface, which is both a large generated file and a false-positive
+  source: standard method signatures such as `URLPattern.exec()`,
+  `Container.exec()` and `D1Database.exec()` read as command injection to a
+  static scanner. The `Env` interface still comes from `wrangler types` (so it
+  cannot drift from `wrangler.jsonc`), while runtime types come from the
+  published `@cloudflare/workers-types` package.
 
 ## Issues surfaced for later milestones
 

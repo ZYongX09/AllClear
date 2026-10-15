@@ -10,7 +10,13 @@
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
     "resolveJsonModule": true,
-    "allowImportingTsExtensions": true
+    "allowImportingTsExtensions": true,
+    // Runtime types (D1Database, KVNamespace, ScheduledController,
+    // ExecutionContext) come from the published package rather than from
+    // `wrangler types`, which runs with --include-runtime=false so the generated
+    // file holds only the small Env interface. See the .gitignore note for why
+    // the generated runtime declarations are not kept in this repository.
+    "types": ["@cloudflare/workers-types"]
   },
   "include": [
     "src/**/*.ts",

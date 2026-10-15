@@ -8,11 +8,13 @@ dist/
 .cloudflare/
 build/
 
-# generated Worker runtime types — `wrangler types` (run by `npm run typecheck`)
-# regenerates this. Committing it adds ~16k lines of generated declarations and
-# trips the security scanner on standard method signatures such as
-# URLPattern.exec(), Container.exec() and D1Database.exec(), which are
-# declarations rather than executable code.
+# Generated Worker types — `npm run typecheck` regenerates this with
+# `wrangler types --include-runtime=false`, so it holds only the small Env
+# interface. Runtime types (D1Database, KVNamespace, ...) come from the
+# @cloudflare/workers-types package instead; generating them here produced a
+# 16k-line file whose standard method signatures (URLPattern.exec(),
+# Container.exec(), D1Database.exec()) were false-positived as command
+# injection by the security scanner.
 apps/api/worker-configuration.d.ts
 
 # env & secrets — never commit these
