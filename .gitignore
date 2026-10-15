@@ -38,5 +38,12 @@ npm-debug.log*
 coverage/
 *.tsbuildinfo
 
+# Wrangler's local state: the miniflare-backed D1/KV/cache databases and
+# deployment metadata under `.wrangler/`. Not a build input, and it holds real
+# rows once a migration has been applied locally. The test suite cleans up after
+# itself so this directory is usually empty, which is exactly why it is worth
+# ignoring now rather than after someone commits a database by accident.
+.wrangler/
+
 # per-session tool state (security-scan hook bookkeeping) — machine local
 .mimosa/

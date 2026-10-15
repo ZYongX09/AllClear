@@ -8,15 +8,20 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "test": "vitest run",
     "typecheck": "wrangler types --include-runtime=false && tsc --noEmit",
-    "db:apply": "wrangler d1 execute allclear-db --remote --file migrations/0001_init.sql"
+    "db:migrate:local": "wrangler d1 migrations apply allclear-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply allclear-db --remote"
   },
   "dependencies": {
+    "@allclear/shared": "file:../../packages/shared",
     "hono": "^4.9.0"
   },
   "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.4.2",
     "@cloudflare/workers-types": "^5.20261014.1",
     "typescript": "latest",
+    "vitest": "^4.1.11",
     "wrangler": "^4.88.0"
   }
 }

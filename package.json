@@ -6,9 +6,9 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "build": "npm --prefix apps/web run build && npm --prefix apps/api run build",
-    "test": "npm --prefix packages/shared test",
+    "build": "npm --prefix packages/shared run build && npm --prefix apps/web run build",
+    "test": "npm --prefix packages/shared test && npm --prefix apps/api test",
     "typecheck": "npm --prefix packages/shared run typecheck && npm --prefix apps/api run typecheck && npm --prefix apps/web run typecheck"
   },
-  "comment": "Deliberately NOT an npm workspaces monorepo. Each package installs its own dependencies. M0 exists to validate the vinext/Workers deployment path, and hoisting the beta vinext + @cloudflare/vite-plugin dependency tree would add an unrelated variable. Revisit after M0."
+  "comment": "Deliberately NOT an npm workspaces monorepo. Each package installs its own dependencies. The M0 route validation showed that hoisting the beta vinext + @cloudflare/vite-plugin tree would add an unrelated variable to the one thing that milestone had to prove; that reasoning still holds, so the decision was revisited after M0 and kept. Consequence worth knowing: `packages/shared` must be built before anything that imports it can run, which is why `build` builds it first. `apps/api` has no build step of its own — `wrangler deploy` bundles it — so it appears in `test` and `typecheck` only."
 }

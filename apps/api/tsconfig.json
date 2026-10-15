@@ -16,11 +16,17 @@
     // `wrangler types`, which runs with --include-runtime=false so the generated
     // file holds only the small Env interface. See the .gitignore note for why
     // the generated runtime declarations are not kept in this repository.
-    "types": ["@cloudflare/workers-types"]
+    //
+    // `@cloudflare/vitest-plugin/types` declares the `cloudflare:test` module
+    // (`env`, `SELF`, `applyD1Migrations`) that the tests import. It is a
+    // subpath export of the plugin package, not a separate @types package.
+    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-plugin/types"]
   },
   "include": [
     "src/**/*.ts",
+    "test/**/*.ts",
     "types/**/*.d.ts",
+    "vitest.config.ts",
     "worker-configuration.d.ts"
   ]
 }
