@@ -66,24 +66,11 @@ export function getStatus(api: Fetcher, slug: string): Promise<CallResult<ReadRe
   return call<ReadResult>(api, `/api/status/${encodeURIComponent(slug)}`);
 }
 
-export interface EchoResult {
-  ok: boolean;
-  reachedVia: string;
-  at: number;
-}
-
 export interface RebuildResult {
   ok: boolean;
   snapshotVersion?: number;
   components?: number;
   error?: string;
-}
-
-/** Proves the Service Binding reaches the API Worker's internal namespace. */
-export function echoInternal(api: Fetcher, internalKey: string): Promise<CallResult<EchoResult>> {
-  return call<EchoResult>(api, "/internal/echo", {
-    headers: { "X-Internal-Key": internalKey },
-  });
 }
 
 /** Rebuilds the snapshot and repopulates both KV keys. */

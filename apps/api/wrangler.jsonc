@@ -40,13 +40,5 @@
 
   // M0 scaffolding. Rebuilds snapshots whose KV payload has fallen behind
   // `page.snapshot_version`. The real prober scheduler lands in M3.
-  "triggers": { "crons": ["* * * * *"] },
-
-  "vars": {
-    // M0 scaffolding, not part of the design. Set to "d1_read_failure" to make
-    // every D1 statement in the read path throw, so that "D1 down, the public
-    // page still serves the last snapshot" can be demonstrated on a real
-    // deployment. Any other value is inert. Remove in M1.
-    "M0_SIMULATE_D1_FAILURE": "none"
-  }
+  "triggers": { "crons": ["* * * * *"] }
 }

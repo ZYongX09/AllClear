@@ -225,6 +225,8 @@ M0 was not asked to resolve these, but it made them concrete.
    The page reads KV and D1 directly only to prove capability item 2
    independently. The real status page should depend on the snapshot alone; the
    direct reads are an M0 artifact and should not survive into M4.
+   **Resolved in M1:** the page was deleted outright, so the artifact is gone
+   rather than carried forward. The rule still stands for M4.
 
 4. **D1 read-subrequest limits were not measured.** The Free-tier limit is 50 read
    subrequests per invocation (Paid: 1000). The plan requires a documented
@@ -258,13 +260,31 @@ Stated plainly, because a deployment that renders a page is easy to over-read.
   Item 4 verified that the i18n/Radix/theme stack works; it says nothing about
   fidelity to any reference design, which is M4 work.
 
-## M0 scaffolding to remove in M1
+## M0 scaffolding removed in M1
 
-- `apps/api/src/index.ts`: `maybeBrokenDb` and its caller.
+All of the following is gone as of M1. The list is kept, rather than deleted, so
+that a reader comparing this document against the tree can see the removal was
+deliberate and complete.
+
+- `apps/api/src/index.ts`: `maybeBrokenDb` and its caller. `/api/status/:slug` now
+  reads `c.env.DB` directly.
+- `apps/api/src/index.ts`: the `/internal/echo` route, with `echoInternal` in
+  `apps/web/lib/allclear-api.ts` and `echoAction` in `apps/web/app/actions.ts`.
+  It existed only to prove the Service Binding, and leaving an exported Server
+  Action that forwards `INTERNAL_KEY` is a surface with no product purpose.
 - `apps/api/wrangler.jsonc`: the `M0_SIMULATE_D1_FAILURE` var.
 - `apps/web/app/status/[slug]/` and `apps/web/app/m0/ui/`: capability reports, not
   the product. The `/status/[slug]` route name is reused by the real page in M4.
-- `~/.config/allclear/m0-secrets.env`: local only, outside the repository.
+  `components/radix-menu-demo.tsx` went with `/m0/ui`; nothing else used it.
+- `~/.config/allclear/m0-secrets.env`: local only, outside the repository. It is
+  still present on the machine that ran M0; it was never part of the repository.
+
+**Consequence worth stating.** Removing `/status/[slug]` removes the only place
+the web Worker → API Worker Service Binding was exercised end to end. Item 7 above
+was verified and is recorded, but from M1 until M2 nothing in the running system
+crosses that boundary, so a regression in it would not be noticed by using the
+product. `lib/allclear-api.ts` is kept for exactly that reason: it is the client
+M2 wires back up.
 
 ## Reproducing
 

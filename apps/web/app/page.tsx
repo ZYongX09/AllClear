@@ -1,9 +1,5 @@
 const links = [
   {
-    href: "/status/example",
-    label: "M0 capability report",
-  },
-  {
     href: "https://github.com/cloudflare/vinext",
     label: "vinext",
   },
@@ -26,8 +22,9 @@ export default function Home() {
             platform.
           </h1>
           <p className="max-w-2xl text-lg leading-8 text-slate-700">
-            This deployment is an M0 technical spike: it proves the build, deploy, storage and
-            Worker-to-Worker path works before any product code is written.
+            Under construction. The data model, the fault state machine and the availability
+            maths come first; the public status page lands in a later milestone. Until then this
+            deployment is a shell — there is no status page to look at yet.
           </p>
         </div>
 
