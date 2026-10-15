@@ -309,3 +309,9 @@ ahead of time does not notify on creation, because it is not news yet.
 * **The route table is not a versioned public API.** It is the surface the web
   Worker calls; nothing in the repository documents it as stable for third
   parties.
+
+A static scan reaches these same conclusions from the other direction: it
+reported seven "no role or permission check observed" candidates, three of them
+on the `DELETE` routes in this file, because it could not expand the `/internal/*`
+middleware. [security-scan.md](security-scan.md) records the scan and resolves
+each candidate.

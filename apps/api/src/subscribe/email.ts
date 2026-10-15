@@ -160,7 +160,14 @@ export async function consumeEmailQuota(
   return { allowed: used <= limit, used, limit };
 }
 
-/** Read the current usage without consuming any. Used by the admin view. */
+/**
+ * Read the current usage without consuming any.
+ *
+ * Currently unused. It was written for the admin view of the send budget, which
+ * is not built yet; the honest state is that nothing calls this, so the
+ * remaining allowance is not visible anywhere. Kept because it is the read half
+ * of `consumeEmailQuota` and the tests exercise both halves of the pair.
+ */
 export async function readEmailQuota(
   db: D1Database,
   day: string,
