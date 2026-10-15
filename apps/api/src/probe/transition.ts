@@ -198,11 +198,14 @@ SELECT t.failure_threshold,
  * S1 — the compare-and-swap, which also stamps this attempt's nonce.
  *
  * Three guards, catching three different things:
- *   * `transition_seq = ?10` rejects a concurrent writer that got there first.
+ *   * `transition_seq = ?9` rejects a concurrent writer that got there first.
  *   * `last_result_id IS NOT ?6` rejects our own replay, which the sequence
  *     guard cannot see because the sequence legitimately advanced.
  *   * `last_probe_at <= ?5` rejects an observation older than one already
  *     processed, so a delayed delivery cannot rewind the counters.
+ *
+ * The scheduler's cursor is deliberately *not* written here. It lives on
+ * `probe_target.next_check_at`, which S7 advances; see the note there.
  */
 export const CAS_STATE_SQL = `
 UPDATE probe_state
@@ -214,10 +217,9 @@ UPDATE probe_state
        last_probe_at         = ?5,
        last_result_id        = ?6,
        last_batch_nonce      = ?7,
-       next_check_at         = ?8,
        updated_at            = ?5
- WHERE probe_target_id = ?9
-   AND transition_seq = ?10
+ WHERE probe_target_id = ?8
+   AND transition_seq = ?9
    AND last_result_id IS NOT ?6
    AND (last_probe_at IS NULL OR last_probe_at <= ?5)
 `;
@@ -312,6 +314,27 @@ SELECT ?1, s.probe_target_id, s.transition_seq, ?2, ?3, ?4,
  WHERE s.probe_target_id = ?9
    AND s.last_batch_nonce = ?10
    AND ?4 <> ?3
+`;
+
+/**
+ * S7 — advance the scheduler's cursor.
+ *
+ * `probe_target.next_check_at` is the only column the due query reads, and it is
+ * the one `idx_probe_target_due` indexes. It is advanced here rather than in the
+ * CAS for the same reason every other statement is nonce-guarded: a batch that
+ * lost the compare-and-swap recorded nothing, so it must not be able to push the
+ * target's next attempt out either.
+ *
+ * A probe-driven outage that is still open does not shorten the interval. The
+ * interval is the sampling rate the operator chose, and the thresholds are what
+ * decide how many samples confirm a transition; changing the rate mid-incident
+ * would make the documented detection lag false exactly when it is being quoted.
+ */
+export const ADVANCE_NEXT_CHECK_SQL = `
+UPDATE probe_target
+   SET next_check_at = ?2, updated_at = ?3
+ WHERE id = ?1
+   AND (SELECT last_batch_nonce FROM probe_state WHERE probe_target_id = ?1) = ?4
 `;
 
 /** Internal signals that never reach a caller directly. */
@@ -428,7 +451,7 @@ async function attemptTransition(
   let results: D1Result<unknown>[];
   try {
     results = await db.batch([
-      // S1 — the CAS, which is also what decides whether S2..S6 apply at all.
+      // S1 — the CAS, which is also what decides whether S2..S7 apply at all.
       db
         .prepare(CAS_STATE_SQL)
         .bind(
@@ -439,7 +462,6 @@ async function attemptTransition(
           observedAt,
           observation.resultId,
           nonce,
-          nextCheckAt,
           targetId,
           expectedSeq,
         ),
@@ -481,13 +503,15 @@ async function attemptTransition(
           targetId,
           nonce,
         ),
+
+      db.prepare(ADVANCE_NEXT_CHECK_SQL).bind(targetId, nextCheckAt, observedAt, nonce),
     ]);
   } catch (error) {
     if (isConstraintViolation(error)) return { kind: "constraint", detail: describe(error) };
     throw error;
   }
 
-  const [cas, inserted, opened, closed] = results;
+  const [cas, inserted, opened, closed, , , advanced] = results;
 
   if (changesOf(cas) === 0) {
     // Nothing else in the batch applied either — every later statement is
@@ -508,6 +532,16 @@ async function attemptTransition(
     return {
       kind: "anomaly",
       detail: `CAS applied but the observation was not recorded (target ${targetId})`,
+    };
+  }
+
+  // The target row was read in the same round trip as the state, so it exists;
+  // zero rows here would mean the nonce guard disagreed with the CAS that just
+  // wrote it, and a target whose cursor stops advancing is polled forever.
+  if (changesOf(advanced) !== 1) {
+    return {
+      kind: "anomaly",
+      detail: `CAS applied but next_check_at was not advanced (target ${targetId})`,
     };
   }
 

@@ -178,6 +178,17 @@ CREATE TABLE IF NOT EXISTS probe_target (
   recovery_threshold INTEGER NOT NULL DEFAULT 2 CHECK (recovery_threshold BETWEEN 1 AND 10),
   auth_ref           TEXT,
   enabled            INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+  -- The scheduler's cursor, and the only one. The due query reads this column,
+  -- which is what `idx_probe_target_due` below indexes, and both the transition
+  -- batch and the configuration-rejection path advance it. It lives on the
+  -- target rather than on `probe_state` because the index that makes the due
+  -- query cheap has to sit alongside `enabled`.
+  --
+  -- An earlier revision also carried a `probe_state.next_check_at` that the
+  -- state machine advanced while the due query read this one. The two never
+  -- disagreed visibly, because the column the scheduler reads was simply never
+  -- updated — so every enabled target was probed on every cron tick and
+  -- `interval_seconds` was decorative. One column, one writer per path.
   next_check_at      INTEGER NOT NULL DEFAULT 0,
   created_at         INTEGER NOT NULL,
   updated_at         INTEGER NOT NULL
@@ -244,7 +255,6 @@ CREATE TABLE IF NOT EXISTS probe_state (
   -- are recorded separately on `probe_transition`.
   first_failed_at       INTEGER,
   first_recovery_at     INTEGER,
-  next_check_at         INTEGER NOT NULL DEFAULT 0,
   updated_at            INTEGER NOT NULL
 );
 
@@ -380,8 +390,10 @@ CREATE TABLE IF NOT EXISTS audit_log (
 
 CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at DESC);
 
--- Global daily send counter. Checked before sending and incremented after, so a
--- runaway notification loop hits a wall instead of a bill.
+-- Global daily send counter. Incremented and checked in one atomic statement
+-- (see `consumeEmailQuota`), so a runaway notification loop hits a wall instead
+-- of a bill. The count is taken before the send, so a failed send still consumes
+-- quota: the ceiling can be reached early, never exceeded.
 CREATE TABLE IF NOT EXISTS email_quota (
   day        TEXT    PRIMARY KEY,
   sent       INTEGER NOT NULL DEFAULT 0,

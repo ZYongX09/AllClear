@@ -25,25 +25,27 @@ export default defineConfig({
       ASSETS: bindings.assets(),
       IMAGES: bindings.images(),
 
-      // The public read path. The status page reads the snapshot from KV and
-      // must keep working when D1 is unavailable, so KV is the primary source.
-      SNAPSHOT_KV: bindings.kv({ id: "c0ef8e657cbe47a6a6e9e72a5df41581" }),
-
-      // Only used by the read chain's documented fallback (KV miss or a stale
-      // snapshot_version). Deliberately not required for a normal page view.
-      DB: bindings.d1({
-        name: "allclear-db",
-        id: "81f85a9d-9aae-4c7c-94a8-a84a812b1c51",
-      }),
-
       // `allclear-api` has no public route. This Service Binding is the only
       // way to reach it, and it is not by itself an authorisation: the Worker
       // also requires INTERNAL_KEY on every /internal/* route.
+      //
+      // Note what is *not* here: this Worker has no KV or D1 binding. The read
+      // chain — KV first, rebuild from D1 on a miss, fall back to the
+      // last-known-good key if D1 is unreachable — lives in `allclear-api`, and
+      // reaches this Worker as one `ReadResult` over the binding. Binding the
+      // same storage here would offer a second, differently-cached path to the
+      // same document, which is how two readers end up disagreeing.
       API: bindings.worker({ worker: "allclear-api" }),
 
       // Server-side only. Never exposed to the browser: the web Worker holds
       // it and attaches it when calling the API Worker.
       INTERNAL_KEY: bindings.secret(),
+
+      // Which status page this deployment's landing page links to. The baseline
+      // migration seeds `example`, so a fresh checkout works without further
+      // configuration; an empty value renders the "not configured" hint instead
+      // of a link to a page that does not exist.
+      DEFAULT_STATUS_SLUG: bindings.text("example"),
     },
   }),
 });

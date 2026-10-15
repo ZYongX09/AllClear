@@ -11,8 +11,10 @@ import { Button } from "@/components/ui/button";
  * Theme switcher built on a real Radix DropdownMenu (portal, focus management,
  * keyboard navigation) rather than a native select, so that the Radix runtime
  * is genuinely exercised on the deployed Worker.
+ *
+ * `showDiagnostics` is off by default; see the note on `LocaleSwitch`.
  */
-export function ThemeToggle() {
+export function ThemeToggle({ showDiagnostics = false }: { showDiagnostics?: boolean } = {}) {
   const t = useTranslations("ui");
   const locale = useLocale();
   const { theme, resolvedTheme, setTheme } = useTheme();
@@ -32,7 +34,7 @@ export function ThemeToggle() {
     <div className="flex flex-col gap-2" data-testid="theme-toggle">
       <DropdownMenu.Root>
         <DropdownMenu.Trigger asChild>
-          <Button variant="outline" data-testid="theme-trigger">
+          <Button variant="outline" size="sm" data-testid="theme-trigger">
             <Sun className="h-4 w-4 dark:hidden" aria-hidden />
             <Moon className="hidden h-4 w-4 dark:block" aria-hidden />
             {t("themeToggle")}
@@ -40,7 +42,7 @@ export function ThemeToggle() {
         </DropdownMenu.Trigger>
         <DropdownMenu.Portal>
           <DropdownMenu.Content
-            align="start"
+            align="end"
             sideOffset={4}
             className="z-50 min-w-40 rounded-md border border-slate-200 bg-white p-1 shadow-md dark:border-slate-700 dark:bg-slate-900"
           >
@@ -60,9 +62,11 @@ export function ThemeToggle() {
         </DropdownMenu.Portal>
       </DropdownMenu.Root>
 
-      <p className="text-sm" data-testid="resolved-theme" data-locale={locale}>
-        {mounted ? t("themeCurrent", { theme: resolvedTheme ?? "unknown" }) : t("themeCurrent", { theme: "…" })}
-      </p>
+      {showDiagnostics ? (
+        <p className="text-sm" data-testid="resolved-theme" data-locale={locale}>
+          {mounted ? t("themeCurrent", { theme: resolvedTheme ?? "unknown" }) : t("themeCurrent", { theme: "…" })}
+        </p>
+      ) : null}
     </div>
   );
 }

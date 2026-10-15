@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ADVANCE_NEXT_CHECK_SQL,
   applyProbeObservation,
   CAS_STATE_SQL,
   type ProbeObservation,
@@ -77,8 +78,10 @@ async function seedTarget(options: TargetOptions = {}): Promise<number> {
     ],
   );
 
+  // `probe_state` carries no scheduling column: the cursor lives on
+  // `probe_target.next_check_at`, which is what the due query reads.
   await env.DB.prepare(
-    "INSERT INTO probe_state (probe_target_id, next_check_at, updated_at) VALUES (?1, 0, ?2)",
+    "INSERT INTO probe_state (probe_target_id, updated_at) VALUES (?1, ?2)",
   )
     .bind(targetId, T0)
     .run();
@@ -95,19 +98,26 @@ interface StateRow {
   first_failed_at: number | null;
   first_recovery_at: number | null;
   open_impact_id: number | null;
-  next_check_at: number;
 }
 
 async function readState(targetId: number): Promise<StateRow> {
   const row = await env.DB.prepare(
     `SELECT consecutive_failures, consecutive_successes, transition_seq, last_probe_at,
-            last_result_id, first_failed_at, first_recovery_at, open_impact_id, next_check_at
+            last_result_id, first_failed_at, first_recovery_at, open_impact_id
        FROM probe_state WHERE probe_target_id = ?1`,
   )
     .bind(targetId)
     .first<StateRow>();
   if (!row) throw new Error(`no probe_state for target ${targetId}`);
   return row;
+}
+
+async function readCursor(targetId: number): Promise<number> {
+  const row = await env.DB.prepare("SELECT next_check_at FROM probe_target WHERE id = ?1")
+    .bind(targetId)
+    .first<{ next_check_at: number }>();
+  if (!row) throw new Error(`no probe_target for id ${targetId}`);
+  return row.next_check_at;
 }
 
 interface ImpactRow {
@@ -501,9 +511,18 @@ describe("transactionality", () => {
           T0 + MINUTE,
           "res-does-not-commit",
           "nonce-does-not-commit",
-          T0 + 2 * MINUTE,
           target,
           before.transition_seq,
+        ),
+        // The scheduler cursor advance, which is nonce-guarded and therefore
+        // *does* apply here. It is included so that the rollback assertion below
+        // covers it: a batch that fails after moving the cursor must leave the
+        // target still due, or a failed observation would delay the next poll.
+        env.DB.prepare(ADVANCE_NEXT_CHECK_SQL).bind(
+          target,
+          T0 + 2 * MINUTE,
+          T0 + MINUTE,
+          "nonce-does-not-commit",
         ),
         // ...followed by a statement that must fail on the primary key.
         env.DB.prepare(
@@ -518,6 +537,7 @@ describe("transactionality", () => {
     expect(after.transition_seq).toBe(before.transition_seq);
     expect(after.consecutive_failures).toBe(before.consecutive_failures);
     expect(after.last_result_id).toBe(before.last_result_id);
+    expect(await readCursor(target)).toBe(0);
   });
 
   it("forbids a second open impact for the same target", async () => {
@@ -563,11 +583,16 @@ describe("misconfiguration", () => {
 });
 
 describe("scheduling", () => {
-  it("advances next_check_at by one interval from the observation", async () => {
+  it("advances the scheduler cursor by one interval from the observation", async () => {
+    // The cursor lives on `probe_target`, not on `probe_state`, because that is
+    // the column the due query reads and the one the due index covers. Asserting
+    // it here is what keeps the two from drifting apart again: an earlier
+    // revision advanced a same-named column on `probe_state` that nothing read,
+    // so every enabled target was polled on every tick.
     const target = await seedTarget({ intervalSeconds: 120 });
     await applyProbeObservation(env.DB, observation(target, { observedAt: T0 }));
 
-    expect((await readState(target)).next_check_at).toBe(T0 + 120);
+    expect(await readCursor(target)).toBe(T0 + 120);
   });
 
   it("records the observation itself with its status code and latency", async () => {

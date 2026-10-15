@@ -2,68 +2,113 @@
  * Client for the `allclear-api` Worker.
  *
  * Every call goes over the `API` Service Binding. `allclear-api` is deployed
- * with `workersDev: false` and no route, so there is no public origin to
- * configure and no way for these calls to leave Cloudflare's network.
+ * with no public route, so there is no origin to configure and no way for these
+ * calls to leave Cloudflare's network. A Service Binding ignores the request's
+ * host — only the path and query are used — so the placeholder origin below
+ * exists because `fetch` requires an absolute URL, not because anything is
+ * resolved from it.
  *
- * A Service Binding ignores the request's host — only the path and query are
- * used. The placeholder origin below is there because `fetch` requires an
- * absolute URL, not because anything is resolved from it.
+ * ## Why the types come from `@allclear/shared`
+ *
+ * `Snapshot` and `ReadResult` are the interface *between* the two Workers. They
+ * live in the shared package so that the page cannot render a field the API does
+ * not write, which is what a locally re-declared copy of the contract eventually
+ * does. Nothing in this file re-declares a field.
+ *
+ * ## Reachability is not authorisation
+ *
+ * The Service Binding is the only way to reach `allclear-api`, but that is not
+ * by itself a credential. `/internal/*` routes additionally require
+ * `INTERNAL_KEY`, which is read from `env` inside this Worker and never leaves
+ * it. A route that is reachable over the binding but unauthenticated would be a
+ * write surface, not an internal one.
  */
+
+import type { ReadResult } from "@allclear/shared";
+
+import { webEnv } from "./worker-env";
 
 const SERVICE_ORIGIN = "https://allclear-api";
-
-export interface SnapshotComponent {
-  publicId: string;
-  name: string;
-  status: string;
-  availableSince: number;
-}
-
-export interface Snapshot {
-  slug: string;
-  name: string;
-  snapshotVersion: number;
-  generatedAt: number;
-  sourceUpdatedAt: number;
-  components: SnapshotComponent[];
-}
-
-/**
- * Which step of the read chain produced the data. `kv-last` means D1 was
- * unavailable and the reader is looking at the last snapshot that was ever
- * written; `none` means there was nothing to serve at all.
- */
-export type SnapshotSource = "kv-fresh" | "d1-rebuild" | "kv-last" | "none";
-
-export interface ReadResult {
-  snapshot: Snapshot | null;
-  source: SnapshotSource;
-  stale: boolean;
-  errors: string[];
-}
 
 export type CallResult<T> =
   | { ok: true; status: number; data: T }
   | { ok: false; error: string };
 
-async function call<T>(
-  api: Fetcher,
-  path: string,
-  init?: RequestInit,
-): Promise<CallResult<T>> {
+/**
+ * Call the API and parse its JSON body.
+ *
+ * A non-2xx response is still a well-formed answer — the read API answers 503
+ * with a full `ReadResult` when it has nothing to serve, and the subscribe
+ * endpoint answers 400/429/502 with a reason. Only a thrown error means the call
+ * did not complete, and that case has to be distinguished from "the API said
+ * no", because the two need different messages on screen.
+ */
+async function call<T>(path: string, init?: RequestInit): Promise<CallResult<T>> {
   try {
-    const response = await api.fetch(`${SERVICE_ORIGIN}${path}`, init);
-    // A non-2xx response is still a well-formed answer from the Worker — the
-    // read API answers 503 with a full ReadResult when it has nothing to
-    // serve. Only a thrown error means the call did not complete.
-    return { ok: true, status: response.status, data: (await response.json()) as T };
+    const response = await webEnv.API.fetch(`${SERVICE_ORIGIN}${path}`, init);
+    const body = (await response.json()) as T;
+    return { ok: true, status: response.status, data: body };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
 }
 
-export function getStatus(api: Fetcher, slug: string): Promise<CallResult<ReadResult>> {
-  return call<ReadResult>(api, `/api/status/${encodeURIComponent(slug)}`);
+/** The published snapshot plus the provenance of the read that produced it. */
+export function readStatus(slug: string): Promise<CallResult<ReadResult>> {
+  return call<ReadResult>(`/api/status/${encodeURIComponent(slug)}`);
+}
+
+/**
+ * Fetch a path from the API and hand its response back unchanged.
+ *
+ * Used by the route handlers that exist so a visitor can reach a URL the API
+ * Worker owns without the API Worker having a public origin: the Atom feed, the
+ * `.json` document, the confirmation link, and the unsubscribe page. Those
+ * handlers must not rewrite the response — the status code and `Cache-Control`
+ * are part of what the API decided, and a proxy that "helpfully" turned a 410
+ * into a 200 would break the confirmation-link expiry.
+ *
+ * A binding failure becomes a 502 rather than propagating: a thrown error inside
+ * a Next route handler surfaces as an opaque 500 with no indication that the
+ * *upstream* was what failed.
+ */
+export async function proxyApi(path: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await webEnv.API.fetch(`${SERVICE_ORIGIN}${path}`, init);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("service binding call failed", { path, error: message });
+    return Response.json({ ok: false, error: "api_unreachable" }, { status: 502 });
+  }
+}
+
+export interface SubscribeResult {
+  ok: boolean;
+  error?: string;
+}
+
+/**
+ * Ask to subscribe an address to a page.
+ *
+ * The response is deliberately uniform: the API answers `{ok: true}` whether the
+ * address was new, already pending, or already confirmed, so that this endpoint
+ * cannot be used to ask "is this address subscribed here". The UI must therefore
+ * not promise more than "if that address can be subscribed, a confirmation mail
+ * has been sent".
+ *
+ * The address is sent in the body rather than the query string so it does not
+ * land in a URL that gets logged.
+ */
+export function subscribeToPage(
+  slug: string,
+  email: string,
+  componentPublicIds: readonly string[] = [],
+): Promise<CallResult<SubscribeResult>> {
+  return call<SubscribeResult>(`/api/status/${encodeURIComponent(slug)}/subscribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, componentPublicIds }),
+  });
 }
 
 export interface RebuildResult {
@@ -73,14 +118,17 @@ export interface RebuildResult {
   error?: string;
 }
 
-/** Rebuilds the snapshot and repopulates both KV keys. */
-export function rebuildSnapshot(
-  api: Fetcher,
-  internalKey: string,
-  slug: string,
-): Promise<CallResult<RebuildResult>> {
-  return call<RebuildResult>(api, `/internal/snapshot/${encodeURIComponent(slug)}/rebuild`, {
+/**
+ * Rebuild a page's snapshot and repopulate both KV keys.
+ *
+ * This is the write path the public read path depends on: it is what maintains
+ * `snapshot:<slug>:last`, without which the documented fallback would have
+ * nothing to fall back to. Admin writes rebuild synchronously on their own, so
+ * this is a repair lever rather than part of the normal flow.
+ */
+export function rebuildSnapshot(slug: string): Promise<CallResult<RebuildResult>> {
+  return call<RebuildResult>(`/internal/snapshot/${encodeURIComponent(slug)}/rebuild`, {
     method: "POST",
-    headers: { "X-Internal-Key": internalKey },
+    headers: { "X-Internal-Key": webEnv.INTERNAL_KEY ?? "" },
   });
 }

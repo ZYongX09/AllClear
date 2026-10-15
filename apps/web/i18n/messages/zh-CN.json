@@ -21,5 +21,158 @@
     "serverHeading": "服务端翻译",
     "serverText": "这句话由服务端的 getTranslations 翻译，而不是在浏览器里。",
     "count": "{n, plural, =0 {没有组件} other {# 个组件}}"
+  },
+  "home": {
+    "eyebrow": "allclear",
+    "title": "面向 Cloudflare 无服务器部署的状态页与基础可用性监控。",
+    "intro": "这个站点上的每一个数字都来自真实测量过的数据。状态在读取时由已记录的事件和最近一次探测结果推导得出，因此无法测量的组件会显示为「未知」，而不会显示为「正常」。",
+    "openStatusPage": "打开状态页",
+    "notConfigured": "本次部署还没有配置状态页。请把 DEFAULT_STATUS_SLUG 设置为本站点要链接的 slug。",
+    "features": {
+      "derived": {
+        "title": "状态是推导的，不是存储的",
+        "body": "存储的状态字段会在维护窗口结束的那一刻过期，因为时间流逝不会触发任何写入。快照携带的是证据，判定由读取方推导。"
+      },
+      "uptime": {
+        "title": "可用率来自真实区间",
+        "body": "停机时间通过扫描已记录的影响区间计算，每一小段取其中重叠的最严重级别，因此与维护窗口撞车的真实故障仍然计入。"
+      },
+      "honest": {
+        "title": "没有测量不等于正常",
+        "body": "没有探测目标、或探测已经停止上报的组件会显示为「未知」。把「没有证据」当作可用率上报，正是这套实现要避免的失误。"
+      }
+    },
+    "diagnosticsHeading": "诊断",
+    "diagnosticsHint": "这些控件用来展示本次部署上的语言切换与主题切换是可用的。",
+    "feedHeading": "订阅源",
+    "feedHint": "每个状态页都可以用 Atom 和 JSON 获取，路径与页面本身一致。"
+  },
+  "status": {
+    "header": {
+      "tagline": "状态"
+    },
+    "values": {
+      "operational": "正常",
+      "degraded_performance": "性能下降",
+      "partial_outage": "部分故障",
+      "full_outage": "严重故障",
+      "maintenance": "维护中",
+      "unknown": "未知"
+    },
+    "summary": {
+      "affected": "{total} 个组件中有 {count} 个受影响",
+      "unknownExplanation": "目前至少有一个组件无法验证。无法验证不等于正常，因此这里显示为「未知」而不是「正常」。"
+    },
+    "components": {
+      "heading": "组件",
+      "empty": "这个状态页还没有任何组件。",
+      "windowUptime": "{days} 天可用率",
+      "uncovered": "该组件没有配置探测目标，状态无法验证，因此显示为「未知」。",
+      "lastChecked": "最近探测",
+      "stale": "这次结果已经超出该组件的新鲜度预算，因此状态显示为「未知」。",
+      "unclassified": "探测正在失败，但没有对应的事件分类，因此状态显示为「未知」。",
+      "availableSince": "开始测量于"
+    },
+    "calendar": {
+      "uptimeWindow": "{days} 天可用率：",
+      "viewLabel": "历史视图",
+      "viewChart": "图表",
+      "viewList": "列表",
+      "viewCalendar": "日历",
+      "oldest": "{days} 天前",
+      "today": "今天",
+      "noData": "未测量",
+      "unmeasured": "未测量 {duration}",
+      "dayLabel": "{date}：{status}，可用率 {uptime}",
+      "dayNoData": "{date}：没有测量数据",
+      "listCaption": "最近 90 天的每日可用率",
+      "columnDay": "日期",
+      "columnStatus": "状态",
+      "columnUptime": "可用率",
+      "columnCoverage": "已测量",
+      "calendarCaption": "最近 90 天的每日状态，按月份排列",
+      "todayMarker": "今天",
+      "weekdays": {
+        "mon": "一",
+        "tue": "二",
+        "wed": "三",
+        "thu": "四",
+        "fri": "五",
+        "sat": "六",
+        "sun": "日"
+      },
+      "months": {
+        "1": "1 月",
+        "2": "2 月",
+        "3": "3 月",
+        "4": "4 月",
+        "5": "5 月",
+        "6": "6 月",
+        "7": "7 月",
+        "8": "8 月",
+        "9": "9 月",
+        "10": "10 月",
+        "11": "11 月",
+        "12": "12 月"
+      }
+    },
+    "changes": {
+      "heading": "事件记录",
+      "none": "还没有记录任何故障或维护。",
+      "ongoing": "进行中",
+      "showUpdates": "{count, plural, other {展开 # 条更新}}",
+      "permalink": "此条目的永久链接",
+      "kind": {
+        "incident": "故障",
+        "maintenance": "维护"
+      },
+      "status": {
+        "scheduled": "已计划",
+        "in_progress": "处理中",
+        "verifying": "验证中",
+        "resolved": "已解决",
+        "completed": "已完成"
+      }
+    },
+    "subscribe": {
+      "cta": "订阅更新",
+      "title": "页面有变化时通知我",
+      "description": "我们会给你发一封确认邮件。在你点击确认之前，不会有任何通知发出。",
+      "emailLabel": "邮箱地址",
+      "emailPlaceholder": "you@example.com",
+      "scopeLegend": "只通知我以下内容",
+      "scopeHint": "一个都不勾选，表示订阅整个页面。",
+      "submit": "发送确认链接",
+      "sending": "发送中…",
+      "cancel": "取消",
+      "close": "关闭",
+      "sent": "如果这个邮箱可以订阅，确认链接已经发出。请打开邮件并点击链接完成订阅。",
+      "errors": {
+        "invalidEmail": "这看起来不像一个邮箱地址。",
+        "badSelection": "选中的组件中有已经不可用的。请刷新页面后重试。",
+        "rateLimited": "这个邮箱的尝试次数过多，请稍后再试。",
+        "unavailable": "订阅功能暂时不可用，请稍后再试。",
+        "sendFailed": "确认邮件发送失败，请稍后再试。",
+        "pageNotFound": "这个状态页已经不存在了。",
+        "unreachable": "无法连接订阅服务，请稍后再试。",
+        "generic": "出错了，请稍后再试。"
+      }
+    },
+    "meta": {
+      "pageTitle": "{name} 状态",
+      "pageDescription": "{name} 的当前状态、可用率历史与事件记录。",
+      "lastUpdated": "更新于",
+      "aged": "已发布的快照距今已有 {age}。",
+      "source": "读取链路：{source}",
+      "version": "快照版本 v{version}",
+      "feed": "Atom 订阅",
+      "json": "JSON",
+      "stale": "本页显示的是最后一次能够发布的快照，可能已经过期。",
+      "unavailableTitle": "没有 {slug} 的状态页",
+      "unavailableBody": "无法读取这个页面的任何数据。它可能并不存在，也可能它背后的存储无法访问。",
+      "unreachableBody": "完全无法连接状态服务，因此目前无法得知这个页面的任何情况。",
+      "unavailableHint": "这不代表一切正常。请稍后再试。",
+      "footer": "状态在读取时由已记录的事件和最近一次探测结果推导得出。可用率由已记录的影响区间计算，没有测量的天数会从百分比中排除，而不会当作正常计入。"
+    }
   }
 }

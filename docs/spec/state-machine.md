@@ -204,7 +204,7 @@ assert beliefs about those instead of the behaviour itself.
 | forbids a second open impact for the same target | The backstop index works. |
 | accepts a new open impact once the previous one is closed | The index is partial, not absolute. |
 | reports a missing target rather than throwing | Misconfiguration is a value, not an exception. |
-| advances `next_check_at` by one interval from the observation | Scheduling state is updated in the same batch. |
+| advances the scheduler cursor by one interval from the observation | `probe_target.next_check_at` is the only column the due query reads. It is advanced in the same batch, nonce-guarded, so a losing attempt cannot push a target's next poll out. |
 | records the observation itself with its status code and latency | The raw sample is persisted, not just its verdict. |
 
 Two of these deserve emphasis because they are the plan's explicit

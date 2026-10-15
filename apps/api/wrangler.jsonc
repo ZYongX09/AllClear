@@ -24,6 +24,20 @@
   "workers_dev": false,
   "observability": { "enabled": true },
 
+  // Non-secret configuration. Secrets (`INTERNAL_KEY`, `UNSUBSCRIBE_HMAC_KEY`)
+  // are set with `wrangler secret put` and are declared in types/env.d.ts.
+  "vars": {
+    // Absolute origin used to build links in outbound email and the Atom feed.
+    // A relative unsubscribe link is useless in a mail client, so notification
+    // is skipped while this is empty. Override per environment.
+    "PUBLIC_BASE_URL": "",
+    // Envelope sender. The domain must be verified with the email provider
+    // before the `EMAIL` binding can be used.
+    "EMAIL_FROM": "status@localhost",
+    // Probe targets processed per cron tick. Clamped to the v1 cap of 20.
+    "MAX_TARGETS_PER_RUN": "20"
+  },
+
   "d1_databases": [
     {
       "binding": "DB",
@@ -38,7 +52,15 @@
     }
   ],
 
-  // M0 scaffolding. Rebuilds snapshots whose KV payload has fallen behind
-  // `page.snapshot_version`. The real prober scheduler lands in M3.
+  // The prober, the uptime rollups and the retention pass all run from this
+  // single cron trigger. One trigger rather than several because the steps are
+  // ordered by dependency — probes produce the impacts the rollups read, and the
+  // rollups must happen before retention deletes the raw observations they are
+  // computed from.
+  //
+  // Note the `send_email` binding is deliberately *not* declared here: adding it
+  // makes `wrangler deploy` fail on any account without a verified sending
+  // domain. Without it, mail is recorded rather than delivered — see
+  // docs/spec/subscriptions.md.
   "triggers": { "crons": ["* * * * *"] }
 }

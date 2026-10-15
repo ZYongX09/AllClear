@@ -17,11 +17,27 @@ import { defineConfig } from "vitest/config";
  */
 const migrations = await readD1Migrations("./migrations");
 
+/**
+ * Test-only bindings.
+ *
+ * These are fixtures for a local `workerd` instance, not credentials: they exist
+ * only for the duration of a test run, they authorise nothing outside it, and
+ * they must never be reused as a deployed value. The two key-shaped ones are
+ * named so that they cannot be mistaken for something real.
+ */
+const fixtures = {
+  INTERNAL_KEY: "fixture-internal-key-not-a-credential",
+  UNSUBSCRIBE_HMAC_KEY: "fixture-unsubscribe-key-not-a-credential",
+  PUBLIC_BASE_URL: "https://status.test",
+  EMAIL_FROM: "status@test.invalid",
+  MAX_TARGETS_PER_RUN: "20",
+};
+
 export default defineConfig({
   plugins: [
     cloudflareTest({
       wrangler: { configPath: "./wrangler.jsonc" },
-      miniflare: { bindings: { TEST_MIGRATIONS: migrations } },
+      miniflare: { bindings: { TEST_MIGRATIONS: migrations, ...fixtures } },
     }),
   ],
   test: {

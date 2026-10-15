@@ -21,5 +21,158 @@
     "serverHeading": "Server-side translation",
     "serverText": "This sentence was translated on the server by getTranslations, not in the browser.",
     "count": "{n, plural, =0 {No components} one {# component} other {# components}}"
+  },
+  "home": {
+    "eyebrow": "allclear",
+    "title": "A status page and basic availability monitoring for Cloudflare serverless deployments.",
+    "intro": "Every number on this site comes from something that was actually measured. Status is derived at read time from recorded incidents and the most recent probe result, so a component nobody can measure is reported as unknown rather than as healthy.",
+    "openStatusPage": "Open the status page",
+    "notConfigured": "No status page is configured for this deployment yet. Set DEFAULT_STATUS_SLUG to the slug you want this site to link to.",
+    "features": {
+      "derived": {
+        "title": "Status derived, never stored",
+        "body": "A stored status field goes stale the moment a maintenance window ends, because no write happens when time passes. The snapshot carries evidence and the reader derives the verdict."
+      },
+      "uptime": {
+        "title": "Uptime from real intervals",
+        "body": "Downtime is computed by scanning recorded impact intervals with the worst overlapping severity per segment, so a fault that coincides with a maintenance window still counts."
+      },
+      "honest": {
+        "title": "Unmeasured is not healthy",
+        "body": "A component with no probe, or whose probe stopped reporting, is shown as unknown. Reporting absence of evidence as uptime is the failure this is built to avoid."
+      }
+    },
+    "diagnosticsHeading": "Diagnostics",
+    "diagnosticsHint": "These controls exist to show that locale switching and theme switching work on this deployment.",
+    "feedHeading": "Feeds",
+    "feedHint": "Every status page is available as Atom and as JSON, at the same path as the page itself."
+  },
+  "status": {
+    "header": {
+      "tagline": "status"
+    },
+    "values": {
+      "operational": "Operational",
+      "degraded_performance": "Degraded performance",
+      "partial_outage": "Partial outage",
+      "full_outage": "Major outage",
+      "maintenance": "Under maintenance",
+      "unknown": "Unknown"
+    },
+    "summary": {
+      "affected": "{count} of {total} components currently affected",
+      "unknownExplanation": "At least one component cannot be verified right now. Unverified is not the same as healthy, so it is reported as unknown rather than as operational."
+    },
+    "components": {
+      "heading": "Components",
+      "empty": "This status page has no components yet.",
+      "windowUptime": "{days}-day uptime",
+      "uncovered": "No probe is configured for this component, so its status cannot be verified and is reported as unknown.",
+      "lastChecked": "Last checked",
+      "stale": "That result is older than this component freshness budget, so the status is reported as unknown.",
+      "unclassified": "The probe is failing but no incident has been classified against it, so the status is reported as unknown.",
+      "availableSince": "Measuring since"
+    },
+    "calendar": {
+      "uptimeWindow": "{days}-day uptime:",
+      "viewLabel": "History view",
+      "viewChart": "Chart",
+      "viewList": "List",
+      "viewCalendar": "Calendar",
+      "oldest": "{days} days ago",
+      "today": "Today",
+      "noData": "Not measured",
+      "unmeasured": "{duration} unmeasured",
+      "dayLabel": "{date}: {status}, {uptime} uptime",
+      "dayNoData": "{date}: no measurement",
+      "listCaption": "Daily uptime for the last 90 days",
+      "columnDay": "Day",
+      "columnStatus": "Status",
+      "columnUptime": "Uptime",
+      "columnCoverage": "Measured",
+      "calendarCaption": "Daily status for the last 90 days, laid out by month",
+      "todayMarker": "Today",
+      "weekdays": {
+        "mon": "Mon",
+        "tue": "Tue",
+        "wed": "Wed",
+        "thu": "Thu",
+        "fri": "Fri",
+        "sat": "Sat",
+        "sun": "Sun"
+      },
+      "months": {
+        "1": "January",
+        "2": "February",
+        "3": "March",
+        "4": "April",
+        "5": "May",
+        "6": "June",
+        "7": "July",
+        "8": "August",
+        "9": "September",
+        "10": "October",
+        "11": "November",
+        "12": "December"
+      }
+    },
+    "changes": {
+      "heading": "Incident history",
+      "none": "No incidents or maintenance have been recorded.",
+      "ongoing": "Ongoing",
+      "showUpdates": "{count, plural, one {Show # update} other {Show # updates}}",
+      "permalink": "Permalink to this entry",
+      "kind": {
+        "incident": "Incident",
+        "maintenance": "Maintenance"
+      },
+      "status": {
+        "scheduled": "Scheduled",
+        "in_progress": "In progress",
+        "verifying": "Verifying",
+        "resolved": "Resolved",
+        "completed": "Completed"
+      }
+    },
+    "subscribe": {
+      "cta": "Subscribe to updates",
+      "title": "Get notified when this page changes",
+      "description": "We will email you a confirmation link. Nothing is delivered until you follow it.",
+      "emailLabel": "Email address",
+      "emailPlaceholder": "you@example.com",
+      "scopeLegend": "Only notify me about",
+      "scopeHint": "Leave every box unchecked to follow the whole page.",
+      "submit": "Send confirmation link",
+      "sending": "Sending…",
+      "cancel": "Cancel",
+      "close": "Close",
+      "sent": "If that address can be subscribed, a confirmation link is on its way. Follow the link in that email to finish.",
+      "errors": {
+        "invalidEmail": "That does not look like an email address.",
+        "badSelection": "One of the selected components is no longer available. Reload the page and try again.",
+        "rateLimited": "Too many attempts for this address. Please try again later.",
+        "unavailable": "Subscriptions are not available right now. Please try again later.",
+        "sendFailed": "The confirmation email could not be sent. Please try again later.",
+        "pageNotFound": "This status page no longer exists.",
+        "unreachable": "The subscription service could not be reached. Please try again later.",
+        "generic": "Something went wrong. Please try again later."
+      }
+    },
+    "meta": {
+      "pageTitle": "{name} status",
+      "pageDescription": "Current status, uptime history and incident log for {name}.",
+      "lastUpdated": "Updated",
+      "aged": "The published snapshot is {age} old.",
+      "source": "Read chain: {source}",
+      "version": "Snapshot v{version}",
+      "feed": "Atom feed",
+      "json": "JSON",
+      "stale": "This page is showing the last snapshot that could be published. It may be out of date.",
+      "unavailableTitle": "No status page for {slug}",
+      "unavailableBody": "Nothing could be read for this page. Either it does not exist, or the storage behind it could not be reached.",
+      "unreachableBody": "The status service could not be reached at all, so nothing about this page is known right now.",
+      "unavailableHint": "This is not a statement that everything is fine. Try again shortly.",
+      "footer": "Status is derived at read time from recorded incidents and the most recent probe results. Uptime is computed from recorded impact intervals, and days without measurement are excluded from the percentage rather than counted as uptime."
+    }
   }
 }
