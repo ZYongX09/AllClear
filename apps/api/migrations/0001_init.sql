@@ -41,7 +41,10 @@ CREATE TABLE IF NOT EXISTS component (
 
 CREATE INDEX IF NOT EXISTS idx_component_page ON component(page_id, order_id);
 
--- Seed: the four example surfaces this project is first used to monitor.
+-- Seed: one placeholder page with the four surfaces a typical deployment
+-- monitors, so a fresh checkout has something to render and the probe scheduler
+-- has a target to attach to. Rename or replace it — nothing in the code depends
+-- on these values beyond the slug matching DEFAULT_STATUS_SLUG.
 -- Statuses are seeded as 'unknown' on purpose — with no probe coverage yet,
 -- claiming 'operational' would be exactly the "absence of evidence reported as
 -- uptime" failure this project exists to avoid.

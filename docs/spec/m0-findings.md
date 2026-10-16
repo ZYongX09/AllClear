@@ -10,8 +10,11 @@ evaluated, because no capability in the list below failed. The alternative
 architecture (Next.js static export on Pages + a separate Hono Worker, giving up
 RSC) was likewise not needed.
 
-Verified on 2026-10-15 against a real Cloudflare account
-(`REDACTED`), Workers.dev subdomain enabled.
+Verified on 2026-10-15 against a real Cloudflare account, with the Workers.dev
+subdomain enabled. The account identifier and the specific `*.workers.dev`
+hostname are omitted here: they are not needed to reproduce any finding below,
+and this document is public. What matters is recorded — a Workers.dev subdomain
+had to exist for cron to work at all (see finding 4).
 
 ## Verified items
 
@@ -21,7 +24,7 @@ these are the part worth reading.
 
 | # | Requirement | Result | Evidence |
 | --- | --- | --- | --- |
-| 1 | vinext builds and deploys | Pass | `allclear-web` deployed, `https://allclear-web.<subdomain>.workers.dev`; `allclear-api` deployed with cron `* * * * *` registered |
+| 1 | vinext builds and deploys | Pass | `allclear-web` and `allclear-api` both deployed; `allclear-api` registered a `* * * * *` cron trigger |
 | 2 | A Next.js page can read D1 and KV | Pass | `/status/example` renders both KV keys (with `snapshotVersion`, `generatedAt`) and a live D1 read (`page.snapshot_version`, `components = 4`) |
 | 3 | Server Actions execute in the expected runtime | Pass | Clicking the page's buttons ran two actions in the Worker and returned their payloads to the browser (see below) |
 | 4 | `next-intl` + Radix/shadcn + theme switching coexist | Pass | `/m0/ui`: locale switched `en → zh-CN`, Radix menu opened through its portal, theme switched `dark → light` |
