@@ -3,8 +3,9 @@
 The Next.js (vinext) Worker: the public status page, the `/admin` console, and the
 Server Actions that write to the API Worker over a Service Binding.
 
-See the [repository README](../../README.md) for what the project is, and
-[docs/engineering.md](../../docs/engineering.md) for how it is put together.
+See the [repository README](../../README.md) for the project overview, the
+[deployment guide](../../docs/deployment.en.md) for production setup and secrets,
+and [engineering notes](../../docs/engineering.md) for the architecture.
 
 ## Scripts
 

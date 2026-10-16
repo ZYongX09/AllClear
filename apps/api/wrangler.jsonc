@@ -42,13 +42,13 @@
     {
       "binding": "DB",
       "database_name": "allclear-db",
-      "database_id": "81f85a9d-9aae-4c7c-94a8-a84a812b1c51"
+      "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID"
     }
   ],
   "kv_namespaces": [
     {
       "binding": "SNAPSHOT_KV",
-      "id": "c0ef8e657cbe47a6a6e9e72a5df41581"
+      "id": "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
     }
   ],
 

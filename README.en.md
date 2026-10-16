@@ -1,322 +1,148 @@
 <div align="center">
 
-# allclear
+# AllClear
 
-**An open-source status page and basic availability monitor for Cloudflare's serverless platform**
+**Open-source, self-hosted status pages and uptime monitoring.**
 
-Public status page · automatic availability probing · uptime computed from real measurements
+Keep users informed about service health, incidents, and recovery.
 
-[![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+[![License: GPL-3.0-only](https://img.shields.io/badge/License-GPL--3.0--only-blue.svg)](LICENSE)
+[![Project status: early preview](https://img.shields.io/badge/status-early_preview-orange.svg)](#operating-limits)
 
-[中文](README.md) · [Engineering notes](docs/engineering.md) · [Specifications](docs/spec/)
+[简体中文](README.md) · **English**
+
+[Deployment guide](docs/deployment.en.md) · [Features](#features) · [Preview](#preview) · [Contributing](#contributing)
 
 </div>
 
----
+## About AllClear
 
-## Overview
+AllClear helps you publish a status page for websites, APIs, and other online services. Bring component health, incident updates, scheduled maintenance, and uptime history into one place. Configure HTTP(S) probes to record failures and recovery, and use the admin console to explain incidents to your users.
 
-`allclear` gives you a public status page running in your own Cloudflare account:
-a component tree, an incident and maintenance timeline, 90-day uptime history, email
-subscriptions, zh-CN/en-US, and dark mode. It depends on no third-party hosted service —
-every resource lives in your account.
+The project is for developers and teams who want to deploy their own instance, control their data, and adapt the software. It runs on Cloudflare without a long-running server or a separate status-page SaaS subscription. The services you monitor do not need to run on Cloudflare.
 
-What separates it from a status page with a hand-typed "99.9%" is where the numbers come
-from. A per-minute prober keeps requesting the endpoints you configure and records the
-failures and recoveries it observes as `impact` intervals; every uptime percentage on the
-page is computed from those records. There is no path that writes a percentage by hand.
-
-If you already run on Cloudflare and want a status page that shares the account with your
-service, keeps its trust boundaries explicit, and adds no SaaS dependency, this is built
-for that.
+> **Early preview:** Read the [operating limits](#operating-limits) before deploying. Do not use AllClear as your sole production alerting source; in particular, review the snapshot-refresh issue and email-delivery requirements.
 
 ## Features
 
-### Public status page (`/status/:slug`)
-
-- **Component tree** grouped into sections, with each component's status derived at read
-  time.
-- **Incident and maintenance timeline** with expandable entries and deep links
-  (`#change-<public_id>` jumps straight to one).
-- **90-day uptime history** in three views: bar strip, month calendar, table.
-- **Email subscriptions** with per-component scoping, double opt-in, and RFC 8058
-  one-click unsubscribe.
-- **zh-CN / en-US, dark mode**, responsive down to 375px.
-- **Atom feed** (`/status/:slug/feed.xml`) and a machine-readable
-  `/status/:slug/snapshot.json`.
-
-### Automatic availability probing
-
-- Admin-configured HTTP probes on a per-minute scheduler.
-- A **persisted state machine** with failure and recovery thresholds, so a single failed
-  request does not open a public incident.
-- Probe transitions open and close `impact` intervals automatically, preserving the real
-  observation timestamps.
-
-### Admin console (`/admin`)
-
-- Page, section, component, probe target, change and manual-impact management.
-- A **budget panel** showing probe-target and daily-email headroom.
-- A **snapshot panel** that reads the *public* endpoint, so a stale snapshot is
-  discoverable from the console.
+- **Public status pages:** Create multiple pages, organize components into sections, and display service health, incident timelines, and maintenance information.
+- **HTTP(S) availability probes:** Configure request methods, expected status codes, and timeouts. Consecutive failure and recovery thresholds determine recorded outage intervals.
+- **90-day uptime history:** Switch between bar, calendar, and table views. Uptime is calculated from measurement coverage and impact intervals; missing measurements remain unknown rather than counting as 100% uptime.
+- **Incident communication:** Publish incidents, append progress updates, manage maintenance records, and share permanent links. Automatic probe impacts and manually published incidents are managed separately.
+- **Subscriptions and integrations:** Atom feeds and JSON snapshots are available. Email subscriptions support component selection, double opt-in, and one-click unsubscribe, with separately configured email delivery.
+- **Admin console:** Manage pages, sections, components, probe targets, and manual impacts; inspect public snapshots and usage budgets.
+- **Languages and themes:** Public status pages support Simplified Chinese and English, with light, dark, and system themes and layouts for desktop and mobile. The admin console and emails currently use English.
 
 ## Preview
 
-![Status page](docs/images/status-page.png)
+![AllClear public status page showing component health, uptime history, and an incident timeline](docs/images/status-page.png)
 
-> The screenshot above is rendered from the project's own fixture data. There is no public
-> demo instance.
+*The preview uses the repository's sample data, not the live status of a service.*
 
-## Deploying to Cloudflare
+## Self-hosting
 
-Everything runs on Cloudflare: a Hono API Worker (public read API, admin API, probe
-scheduler), a Next.js web Worker (status page and console), plus D1 and KV. The steps below
-take it from nothing to reachable in your own account.
+The supported deployment target is **Cloudflare Workers**, with D1 for application data, KV for public snapshots, and Cron Triggers for scheduled probes. A custom domain is optional; you can start with a Cloudflare-provided `workers.dev` address.
 
 ### Prerequisites
 
-- A Cloudflare account. The free plan works, but note the
-  [D1 read-subrequest limit on Free](docs/engineering.md#capacity-boundaries-v1).
-- Node.js 20+ and npm.
-- A `*.workers.dev` subdomain enabled on the account. Registering a cron trigger requires
-  the subdomain to exist **even for a Worker that is not publicly reachable** — this is an
-  observed result, recorded in the [M0 findings](docs/spec/m0-findings.md).
-- Wrangler logged in: `npx wrangler login`. Or supply `CLOUDFLARE_API_TOKEN` and
-  `CLOUDFLARE_ACCOUNT_ID` in front of each command.
+- A Cloudflare account with a `workers.dev` subdomain configured under **Workers & Pages**.
+- Git, **Node.js 22.12+** (Node.js 24 LTS recommended), and npm.
+- An active DNS zone in the same Cloudflare account if you want a custom domain. Email notifications require a separately configured sending service.
 
-### 1. Clone and install dependencies
-
-This is not an npm workspaces monorepo — each package installs its own dependencies:
+### Get the source
 
 ```sh
-git clone https://github.com/ZYongX09/AllClear
+git clone --branch develop https://github.com/ZYongX09/AllClear.git
 cd AllClear
-npm --prefix packages/shared install
-npm --prefix apps/api install
-npm --prefix apps/web install
+
+npm --prefix packages/shared ci
+npm --prefix apps/api ci
+npm --prefix apps/web ci
+npm --prefix packages/shared run build
 ```
 
-### 2. Create the D1 database and KV namespace
+The current development version is on `develop`. After installing dependencies, follow the **[Cloudflare deployment guide](docs/deployment.en.md)** to:
 
-```sh
-cd apps/api
-npx wrangler d1 create allclear-db
-npx wrangler kv namespace create SNAPSHOT_KV
+1. Authenticate with Cloudflare and create your own D1 database and KV namespace.
+2. Configure resource bindings, apply database migrations, and set the service key and admin passphrase.
+3. Deploy the API Worker followed by the web Worker, with the correct Service Binding.
+4. Sign in at `/admin`, configure a page and probe targets, then verify `/status/<slug>`.
+
+The guide also covers the secrets file required for the first web deployment, domains, email setup, upgrades, and troubleshooting. Worker names, resource IDs, domains, and the default page can be changed for your deployment. Never reuse another instance's configuration or credentials.
+
+Cloudflare's free allowances are not unlimited. Costs depend on requests, probe frequency, storage, and email delivery; review [platform pricing](https://developers.cloudflare.com/workers/platform/pricing/) and quotas for your expected usage.
+
+## How it works
+
+```text
+Visitors / administrators
+           │
+           ▼
+      Web Worker ── Service Binding ── API Worker ◀── Cron Triggers
+  Status pages and console                 │
+                                     ┌─────┴─────┐
+                                     D1         KV
+                                Application   Public
+                                    data     snapshots
 ```
 
-Put the `database_id` and `id` each command prints into `apps/api/wrangler.jsonc`:
+The web Worker handles presentation and admin interactions. The API Worker manages data, probes, and snapshot publication. The API has no public route by default, and admin requests also require a shared service key. Public pages read snapshots and indicate stale or unavailable data.
 
-```jsonc
-"d1_databases": [
-  { "binding": "DB", "database_name": "allclear-db", "database_id": "<your database_id>" }
-],
-"kv_namespaces": [
-  { "binding": "SNAPSHOT_KV", "id": "<your KV id>" }
-]
-```
+Built with **TypeScript, React, Next.js / vinext, Hono, Tailwind CSS, Cloudflare Workers, D1, and KV**. See the [engineering notes](docs/engineering.md) for architecture and consistency details.
 
-> `wrangler.jsonc` deliberately omits `account_id`: the account is supplied per environment
-> through `CLOUDFLARE_ACCOUNT_ID`. Keep the database name `allclear-db`; renaming it also
-> means updating the migration scripts in `apps/api/package.json`.
+## Documentation
 
-### 3. Apply the database migrations
-
-```sh
-cd apps/api
-npm run db:migrate:remote   # wrangler d1 migrations apply allclear-db --remote
-```
-
-### 4. Set the secrets
-
-The API Worker reads two secrets. Write them with Wrangler:
-
-```sh
-cd apps/api
-npx wrangler secret put INTERNAL_KEY          # shared web -> api key; generate a random string
-npx wrangler secret put UNSUBSCRIBE_HMAC_KEY  # signs unsubscribe links; unset means no mail is sent
-```
-
-The web Worker reads `INTERNAL_KEY` (**the same value**) and `ADMIN_TOKEN` (the passphrase
-you sign in to `/admin` with). Its configuration lives in `cloudflare.config.ts` rather than
-`wrangler.jsonc`, so those two are written during the **first deploy** — see the next step.
-
-> Do not put secrets in command-line arguments or pipe them through `echo` — they end up in
-> your shell history. Use the interactive prompt, or point `--secrets-file` at a file outside
-> the repository.
-
-### 5. Deploy both Workers
-
-Deploy the API first:
-
-```sh
-cd apps/api
-npx wrangler deploy
-```
-
-Then the web Worker. **The first deploy must go through `cf` with a secrets file**:
-`vinext-cloudflare deploy` does not forward `--secrets-file`, and the Worker does not have
-those two secrets yet.
-
-```sh
-cd apps/web
-npm run build
-
-# outside the repository, e.g. ~/.config/allclear/web-secrets.env
-cat > ~/.config/allclear/web-secrets.env <<'EOF'
-INTERNAL_KEY=<the same value as the API Worker>
-ADMIN_TOKEN=<your admin passphrase>
-EOF
-
-CLOUDFLARE_API_TOKEN=<token> CLOUDFLARE_ACCOUNT_ID=<account> \
-  npx cf deploy --prebuilt --secrets-file ~/.config/allclear/web-secrets.env
-```
-
-Once the secrets exist on the Worker, ordinary deploys use the normal command:
-
-```sh
-cd apps/web && npm run deploy
-```
-
-> `cf` and Wrangler are two independent credential systems: `cf` only accepts
-> `CLOUDFLARE_API_TOKEN` or its own OAuth login and does **not** reuse Wrangler's session.
-> That and the other deployment-time traps are recorded in full in the
-> [M0 findings](docs/spec/m0-findings.md).
-
-### 6. Sign in for the first time
-
-Open `https://<your web Worker hostname>/admin` and sign in with `ADMIN_TOKEN`. From the
-console you can create pages, sections, components and probe targets; the status page then
-generates its content from the probe results.
-
-> Deployment is manual — there is no CI pipeline that publishes on push. A successful
-> `git push` is **not** evidence of a successful deployment; verify by hitting the deployed
-> Worker.
-
-## Configuration reference
-
-| Where | Name | Kind | Required | What it does |
-| --- | --- | --- | --- | --- |
-| `apps/api` | `DB` | D1 binding | yes | Source of truth: every entity and probe record |
-| `apps/api` | `SNAPSHOT_KV` | KV binding | yes | Published snapshots |
-| `apps/api` | `INTERNAL_KEY` | secret | yes | Shared key for `/internal/*`; empty disables the internal namespace |
-| `apps/api` | `UNSUBSCRIBE_HMAC_KEY` | secret | no | Signs unsubscribe links; unset means subscriptions work but no mail is sent |
-| `apps/api` | `PUBLIC_BASE_URL` | var | recommended | Source of absolute links in email and the Atom feed |
-| `apps/api` | `EMAIL_FROM` | var | no | Envelope sender address |
-| `apps/api` | `MAX_TARGETS_PER_RUN` | var | no | Probe targets per cron tick, capped at 20 |
-| `apps/web` | `API` | Service Binding | yes | Points at `allclear-api` |
-| `apps/web` | `INTERNAL_KEY` | secret | yes | The same value as the API side |
-| `apps/web` | `ADMIN_TOKEN` | secret | yes | `/admin` passphrase; empty refuses every admin action |
-| `apps/web` | `DEFAULT_STATUS_SLUG` | var | no | Which status page the landing page links to; defaults to `example` |
-
-## Architecture
-
-```
-                    ┌─────────────────────────────┐
-   browser ────────▶│  allclear-web               │
-                    │  Next.js (vinext)           │
-                    │  • public status page       │
-                    │  • /admin console           │
-                    │  • Server Actions (writes)  │
-                    └───────────┬─────────────────┘
-                                │  Service Binding
-                                │  + X-Internal-Key
-                                ▼
-                    ┌─────────────────────────────┐
-   cron ───────────▶│  allclear-api               │
-                    │  Hono Worker                │
-                    │  • public read API          │
-                    │  • /internal/admin/*        │
-                    │  • probe scheduler          │
-                    └───────────┬─────────────────┘
-                                │
-                    ┌───────────┴───────────┐
-                    ▼                       ▼
-                 D1 (source of truth)    KV (published snapshots)
-```
-
-`allclear-api` is deployed with **no public route**. The web Worker reaches it over a
-Service Binding, and that reachability is *not* treated as authentication — every
-`/internal/*` route additionally requires the shared `INTERNAL_KEY`. The browser never holds
-any admin credential.
+| Document | When to use it |
+| --- | --- |
+| [Deployment guide](docs/deployment.en.md) / [简体中文](docs/deployment.md) | Initial setup, resources and secrets, domains, upgrades, and troubleshooting |
+| [Engineering notes](docs/engineering.md) | Architecture, read paths, capacity, and verification boundaries |
+| [Probes](docs/spec/probe.md) · [Uptime calculation](docs/spec/uptime-math.md) | Scheduling, failure detection, and the meaning of historical data |
+| [Admin API](docs/spec/admin-api.md) · [Admin UI](docs/spec/admin-ui.md) | Extending the console or using internal management endpoints |
+| [Subscriptions](docs/spec/subscriptions.md) · [Snapshot contract](docs/spec/snapshot.md) | Integrating notifications or consuming public data |
 
 ## Local development
 
-**Look at the UI without any Cloudflare resources** — fixture Workers supply the data, so it
-renders with no D1, no KV and no migrations:
+After installing dependencies, preview the UI with sample data without creating Cloudflare resources:
 
 ```sh
 cd apps/web
 npx vite dev --config verify/vite.config.verify.ts --port 5219
 ```
 
-Open <http://localhost:5219/status/fixture>. The first compile is slow; that is expected.
+Open <http://localhost:5219/status/fixture>. This mode is for UI development only: it does not run real probes, persist production data, or deliver email. See [`apps/web/README.md`](apps/web/README.md) for details.
 
-**Test, type-check and build:**
+Run checks from the repository root:
 
 ```sh
-npm run typecheck   # builds packages/shared, then type-checks all three packages
-npm test            # packages/shared (pure Node), then apps/api (real workerd + D1)
-npm run build       # builds packages/shared, then apps/web
+npm run typecheck
+npm test
+npm run build
 ```
 
-`apps/api` tests run against a **real `workerd` runtime with a real D1 binding**, not mocks —
-the design depends on specific SQLite behaviours (`db.batch()` rollback semantics,
-conditional `UPDATE` matching zero rows, partial unique indexes, `meta.changes`), and mocks
-would assert beliefs about those behaviours instead of the behaviours themselves.
+Stop the preview server before building to avoid concurrent writes to the build directories. Shared logic and API tests use Node.js and a local `workerd` / D1 environment respectively; they do not apply remote database migrations.
 
-After changing the schema in `apps/api`, apply migrations locally with
-`npm run db:migrate:local` (`wrangler d1 migrations apply allclear-db --local`).
+## Operating limits
 
-## Documentation
+- **Snapshot refresh:** Static inspection found that continuously successful probes may not refresh an already published snapshot, leaving public pages with stale data or unknown status. You can currently rebuild a snapshot from the console, but this is not a substitute for continuous monitoring. See [known issues](docs/deployment.en.md#known-issues).
+- **Probe scale:** The current supported deployment budget is 20 enabled targets, with a minimum interval of 60 seconds and one enabled target per component. Probes run from Cloudflare, not an independent multi-region consensus network.
+- **Notifications:** Probe-generated impacts do not automatically create timeline incidents or send incident emails. Email delivery requires a real sending binding; the default configuration does not deliver confirmation messages.
+- **Admin access:** The console uses a shared admin passphrase, not a multi-user role and permission system.
+- **Availability boundary:** The status page and prober share Cloudflare and cannot independently observe a platform-wide Cloudflare outage.
 
-| Document | What it covers |
-| --- | --- |
-| [docs/engineering.md](docs/engineering.md) | Architecture, design commitments, the read chain, capacity boundaries, security posture, and the verification boundary |
-| [docs/spec/state-machine.md](docs/spec/state-machine.md) | The fault state machine |
-| [docs/spec/data-model.md](docs/spec/data-model.md) | The data model and the ID-role split |
-| [docs/spec/probe.md](docs/spec/probe.md) | Probe scheduling, SSRF constraints, retention |
-| [docs/spec/uptime-math.md](docs/spec/uptime-math.md) | The uptime algorithm (interval sweep) |
-| [docs/spec/snapshot.md](docs/spec/snapshot.md) | Snapshot contract and consistency boundary |
-| [docs/spec/admin-api.md](docs/spec/admin-api.md) / [admin-ui.md](docs/spec/admin-ui.md) | Admin API and console |
-| [docs/spec/subscriptions.md](docs/spec/subscriptions.md) | Subscriptions, unsubscribe, send quota |
-| [docs/spec/testing.md](docs/spec/testing.md) | How the suites are organised and what they run against |
-| [docs/spec/visual-parity.md](docs/spec/visual-parity.md) | Visual verification record and its known gaps |
-| [docs/spec/security-scan.md](docs/spec/security-scan.md) | The static security scan record (result: inconclusive) |
-| [docs/spec/m0-findings.md](docs/spec/m0-findings.md) | What was observed on real Cloudflare infrastructure, and the workarounds |
-| [AGENTS.md](AGENTS.md) | Working rules for this repository (branches, deployment, secrets, licensing) |
-
-## Maturity and known limitations
-
-The project has not had a release yet. A few things worth knowing before you use it — the
-full list is in the [engineering notes](docs/engineering.md#verification-honesty):
-
-- Neither the admin console nor the status page has **automated tests**, and no
-  human-perspective visual review has happened.
-- A deep static security scan came back **inconclusive**, so **this project must not be
-  described as security-audited** — see the [scan record](docs/spec/security-scan.md).
-- The status page and the prober both run on Cloudflare: **if Cloudflare itself is down, this
-  system cannot report on it.** Detecting a full-platform outage requires a probe source
-  outside Cloudflare; that is out of scope for now and is recorded as a risk rather than a
-  solved problem.
+AllClear is early-stage software. Production end-to-end acceptance is incomplete, and the project should not be described as having passed a complete security audit. Test coverage and outstanding verification are documented in the [engineering notes](docs/engineering.md#verification-honesty).
 
 ## Contributing
 
-This is primarily a personal project at the moment. Issues and pull requests are welcome.
+[Issues](https://github.com/ZYongX09/AllClear/issues) for bug reports and feature discussions, and [pull requests](https://github.com/ZYongX09/AllClear/pulls), are welcome.
 
-`develop` is the development branch and `main` is the release branch. Feature work lands on
-`develop`; merging into `main` is a deliberate release step. See [AGENTS.md](AGENTS.md) for
-the full rules.
+- Include reproduction steps, deployment details, and relevant logs when reporting a problem. Remove secrets, email addresses, and other sensitive information.
+- Discuss substantial changes first. Target `develop` with pull requests, and run type checks, tests, and the build.
+- Keep deployment configuration generic. Do not commit personal account, database, domain, or credential values.
+
+See [AGENTS.md](AGENTS.md) for development and release conventions.
 
 ## License
 
-**GNU General Public License v3.0** (SPDX: `GPL-3.0-only`) — full text in
-[LICENSE](LICENSE).
+AllClear is licensed under the **GNU General Public License v3.0 only** (SPDX: `GPL-3.0-only`). Use, modification, and redistribution are subject to [LICENSE](LICENSE). Third-party dependencies retain their respective licenses.
 
-Copyright (C) 2026 ZhX589, ZYongX09
-
-Functionality was informed by studying mature commercial status-page products, but **all code
-and assets in this repository are original**. No third-party stylesheets, markup, copy,
-message catalogs, logos, or images were copied. Dependencies are all GPL-3.0-compatible
-(MIT / ISC / OFL / Apache-2.0).
-[OpenStatus](https://github.com/openstatusHQ/openstatus) is **AGPL-3.0** and is not a source
-for this project's code.
+Copyright (C) 2026 ZhX589, ZYongX09.

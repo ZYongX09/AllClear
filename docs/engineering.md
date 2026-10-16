@@ -178,6 +178,15 @@ page view; R2's advantages are not exercised at that size, and dual-writing woul
 add a second copy to keep in step for no benefit. The rationale is written out in
 [`docs/spec/snapshot.md`](spec/snapshot.md).
 
+### Known publication gap
+
+Source inspection found that the scheduler republishes snapshots for probe-impact
+transitions, but not for every successful observation or rollup update. A snapshot
+whose version still matches can therefore retain old probe evidence and history.
+This has not been reproduced as a runtime scenario; it is an unresolved code-path
+finding, not a freshness guarantee. See the [deployment guide's known
+issues](deployment.en.md#known-issues) for the effect and diagnostic rebuild action.
+
 ---
 
 ## Capacity boundaries (v1)
