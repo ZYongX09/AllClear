@@ -5,14 +5,31 @@ follow from it.
 
 ```sh
 npm test          # packages/shared, then apps/api
-npm run typecheck # all three packages
+npm run typecheck # builds packages/shared, then type-checks all three packages
+npm run build     # builds packages/shared, then apps/web
 ```
 
 | Suite | Files | Tests | Runs against |
 |---|---|---|---|
 | `packages/shared` | 4 | 82 | plain Node |
-| `apps/api` | 9 | 197 | real `workerd` with a real D1 binding |
+| `apps/api` | 10 | 212 | real `workerd` with a real D1 binding |
 | `apps/web` | — | — | no suite yet; see below |
+
+### `packages/shared` must be built before anything imports it
+
+This is not an npm workspaces monorepo. Each package installs its own
+dependencies, and `apps/api` and `apps/web` resolve `@allclear/shared` through
+the package's `exports` map to `dist/index.d.ts`. So **a change to shared source
+is invisible to the other two packages until `packages/shared` is rebuilt**, and
+a type-check run without that build reports on the previous build — it can pass
+while the source is broken, or fail while the source is fine.
+
+Both root scripts therefore build it first, in order:
+`typecheck` runs `packages/shared run build` before checking anything, and `build`
+builds shared before `apps/web`. Running `npm --prefix apps/web run typecheck`
+on its own after editing shared is the way to get a confusing result, and it is
+the reason the rule is written down here rather than left in the root
+`package.json` comment where only someone reading that file would find it.
 
 ## `packages/shared` — pure functions, plain Node
 
@@ -93,14 +110,37 @@ they must never be reused as a deployed value — which is why the two key-shape
 ones are named so they cannot be mistaken for something real. Real values come
 from the environment or a secret store and appear in no file in this repository.
 
+### The Cache API is exercised, not mocked
+
+`cache.test.ts` runs against the `workerd` environment's real `caches.default`,
+where the API exists and round-trips. It covers seven cases: a written document
+reads back, a document that was never written reads as `null`, an entry past its
+`max-age` is not served, `purge` removes an entry, and every entry point degrades
+to "no cached copy" rather than throwing when the API is absent. That last group
+is the point: the cache is an optimisation, and the module's contract is that a
+missing or broken cache costs speed rather than correctness.
+
+What it does not cover is a real KV outage or a cross-colo miss. The layer's
+*placement* — last in the read chain, so a KV miss still rebuilds from D1 rather
+than serving a stale local copy — is asserted by `snapshot.test.ts`'s ordering
+tests, not here.
+
 ## `apps/web` — no suite yet
 
-There is no `test` script in `apps/web`, and the M4 verification was done by
-driving a browser rather than by asserting in code. That is a gap, not a
-decision: the status page has real branches worth pinning down — a stale probe
-rendering `unknown` rather than `operational`, an unmeasured day drawing
-differently from an `unknown` day, the two-stage derivation surviving into the
-render — and none of them are covered by a test today.
+There is no `test` script in `apps/web`, and both the M4 status-page verification
+and the M2 console verification were done by driving a browser rather than by
+asserting in code. That is a gap, not a decision: the status page has real
+branches worth pinning down — a stale probe rendering `unknown` rather than
+`operational`, an unmeasured day drawing differently from an `unknown` day, the
+two-stage derivation surviving into the render — and the console has a security
+boundary worth pinning down even more. None of them are covered by a test today.
+
+The console's write guard was checked the hard way instead, in a browser: the
+rendered create-page form was POSTed with its real hidden action fields but with
+`credentials: "omit"`, which is exactly what an unauthenticated caller has. The
+response carried `not_signed_in`, and a follow-up read confirmed nothing was
+created. That is a real check of the real question, but it is a check someone ran
+once, not a regression test. See [admin-ui.md](admin-ui.md).
 
 What exists to build on is `apps/web/verify/`:
 
@@ -109,7 +149,16 @@ What exists to build on is `apps/web/verify/`:
   awkward — a fresh probe, a stale probe, no probe, an open incident with a
   timeline, a scheduled maintenance that must *not* paint its component, a
   component missing five days of history.
-- `vite.config.verify.ts` wires that stub in as an `auxiliaryWorkers` entry.
+- `admin-stub.ts` answers `/internal/admin/*` from a mutable in-memory store, so
+  the admin console renders *and is writable* against the same fixture. It is
+  asked first and answers only for the admin prefix, so it cannot shadow a public
+  route. It checks only that `X-Internal-Key` is present — the fixture has no copy
+  of the real secret and should not have one; the value comparison is the API
+  Worker's job and is tested in `apps/api`. It does reproduce the API's
+  absent/null/string distinction for nullable fields, because the console's
+  "move a component out of a section" path depends on that distinction and a stub
+  that collapsed it would make a broken path look correct.
+- `vite.config.verify.ts` wires both stubs in as `auxiliaryWorkers` entries.
 
 ```sh
 cd apps/web
@@ -138,3 +187,8 @@ the one failure mode a fixture must not have.
   spans both.
 - **Visual output is not asserted.** `docs/spec/visual-parity.md` records what was
   measured and, in §3, what could not be.
+- **The console has no automated tests at all.** Its session verification, its
+  cookie attributes and its per-action guard are the security boundary for a
+  public write surface, and none of them are pinned by a test. A future suite
+  should start there: the guard is a pure-ish function of the request's cookie
+  and the configured token, which makes it the cheapest of these gaps to close.

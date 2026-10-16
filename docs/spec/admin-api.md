@@ -56,7 +56,25 @@ HTTP request".
 
 | Method | Path | Purpose | Validation |
 | --- | --- | --- | --- |
-| `GET` | `/pages/:slug` | The admin view of one page: the page row plus its sections, components, probe targets (with scheduler state) and 100 most recent changes. | None beyond the slug. Unknown slug returns `404 page_not_found`. |
+| `GET` | `/pages` | Every page with its counts (sections, components, enabled probe targets). The console's index. | None. |
+| `GET` | `/email-quota` | Today's send counter and the daily ceiling, for the console's budget panel. | None. |
+| `GET` | `/pages/:slug` | The admin view of one page: the page row plus its sections, components, probe targets (with scheduler state), 100 most recent changes, and up to 100 hand-entered impacts. | None beyond the slug. Unknown slug returns `404 page_not_found`. |
+
+`GET /pages/:slug` returns two arrays that a reader might expect to be one.
+`changes` is the incident/maintenance history; `impacts` is *only* the
+hand-entered outage intervals, filtered on `probe_target_id IS NULL` and
+`change_id IS NULL`. The filter is deliberate: a probe-generated impact is owned
+by the probe state machine, and an operator who could close one by hand would be
+closing an impact the next probe run is about to reopen. The console therefore
+renders a close button for every row it receives in `impacts`, without having to
+re-check which kind each one is.
+
+### Pages (write)
+
+| Method | Path | Purpose | Validation |
+| --- | --- | --- | --- |
+| `POST` | `/pages` | Create a status page. Returns `201`. | `slug` required, matching `^[a-z0-9]+(?:-[a-z0-9]+)*$`, max 64; `name` required, max 120. A duplicate slug is caught as a unique-constraint violation and reported as `400` with field `slug`, not as a raw SQLite error. |
+| `PATCH` | `/pages/:slug` | Rename a page. | `name` max 120. Optional. |
 
 ### Sections
 
@@ -304,11 +322,20 @@ ahead of time does not notify on creation, because it is not news yet.
   the Service Binding are the whole control.
 * **Unexpected errors expose their message.** The `500` branch returns the raw
   error string in `detail`.
-* **Two validation helpers are defined but unused.** `requireSlug` and
-  `nullableString` exist in `validate.ts`; no route imports them.
+* **Two validation helpers were once defined but unused.** `requireSlug` and
+  `nullableString` in `validate.ts` are now used: `requireSlug` validates the
+  `slug` on `POST /pages` and `nullableString` handles the explicitly-nullable
+  fields such as `PATCH /components/:publicId`'s `sectionPublicId`. The earlier
+  version of this document recorded them as dead code; the console's page-create
+  and page-rename routes are what made them live.
 * **The route table is not a versioned public API.** It is the surface the web
   Worker calls; nothing in the repository documents it as stable for third
   parties.
+
+The console that drives these routes is documented separately in
+[admin-ui.md](admin-ui.md). That document owns the questions this one
+deliberately does not answer: what the operator sees, how the `ADMIN_TOKEN` gate
+differs from `INTERNAL_KEY`, and which write operations were left out on purpose.
 
 A static scan reaches these same conclusions from the other direction: it
 reported seven "no role or permission check observed" candidates, three of them

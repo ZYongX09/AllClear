@@ -91,21 +91,54 @@ The plan's §9 asks for two visual paths: (a) a computed-style and geometry diff
 and (b) rendered PNGs handed to a human-perspective review.
 
 Path (a) is above. **Path (b) did not run**, and this is the honest state rather
-than a completed check:
+than a completed check. It was retried after M4 and failed the same way:
 
-- The PNGs were rendered — `xvfb-run firefox --screenshot` at 1280×1800 in light
-  and dark, and at 390×1500 — and exist as artefacts.
+- The PNGs render. `xvfb-run firefox --screenshot` at 1280×1800 (light) and
+  390×1500 (mobile) produced `/tmp/ac-desktop.png` and `/tmp/ac-mobile.png`.
 - No reviewer could look at them. The `visual-judge` subagent's model provider is
-  not available in this environment (`provider-not-found`), and the session model
-  does not accept image input. The in-app browser's screenshot path also fails
-  here (`browser screenshot surface preparation timed out`).
+  not available in this environment. The retry returned the same error as the
+  first attempt: `provider-not-found; selection=…/GLM-5.3-Flash`. The session
+  model does not accept image input either, and the in-app browser's screenshot
+  path fails here.
 - Path (a) is not a substitute for it. A diff table says the radius is 8px; it
   cannot say whether the page looks right.
 
-So the numbers above are trustworthy and the human-perspective verdict is missing.
-Closing it needs an image-capable reviewer, which is an environment change rather
-than a code change. Until then this milestone should be described as
-**functionally verified and visually unverified**.
+So the numbers above are trustworthy and the human-perspective verdict is
+missing. Closing it needs an image-capable reviewer, which is an environment
+change rather than a code change. Until then this milestone should be described
+as **functionally verified and visually unverified**.
+
+### A correction: the M4 "dark" PNG was not dark
+
+Re-rendering for the retry turned up a defect in this document's own artefacts.
+The M4 dark render used
+`layout.css.prefers-color-scheme.content-override` set to `0`, which was assumed
+to make headless Firefox report a dark preference. It does not — not with `0`,
+and not with `1`. Measured mean luminance of the three renders:
+
+| Artefact | Mean luminance (0–255) |
+|---|---|
+| `allclear-desktop.png` (M4, light) | 248.7 |
+| `allclear-dark.png` (M4, labelled dark) | 248.7 |
+| `ac-desktop.png` (this session, light) | 248.6 |
+
+The two M4 files are byte-different (174 926 vs 174 939 bytes, from
+anti-aliasing and the clock) but visually identical: **the file named dark is a
+light render.** The pref reaches `prefs.js` and Firefox still renders light, so
+the approach is wrong rather than mistyped, and §4's instruction has been
+corrected to say so.
+
+What survives is the dark-mode *behaviour* claim in §1: that was observed by
+selecting Dark in the running page's own toggle, which writes `localStorage`, and
+the recorded palette values (`rgb(2,6,23)` background, the `oklch` banner values)
+came from that. The toggle path works. It is only the headless screenshot that
+cannot reach it, because `--screenshot` has no way to seed `localStorage` before
+the page's own theme script runs.
+
+The practical consequence: there is **no trustworthy dark-mode image artefact**,
+and the light one is the only render worth reviewing. Producing a dark PNG needs
+either an image-capable reviewer with a real browser session or a build-time
+`?theme=dark` hook, and neither exists.
 
 ## 4. Reproducing the measurements
 
@@ -126,9 +159,16 @@ The PNG renders:
 ```sh
 xvfb-run -a --server-args="-screen 0 1400x2000x24" \
   firefox --no-remote --profile /tmp/ffprof --window-size=1280,1800 \
-  --screenshot /tmp/allclear-desktop.png "http://localhost:5180/status/fixture"
+  --screenshot /tmp/ac-desktop.png "http://localhost:5180/status/fixture"
 ```
 
-For the dark render, set `layout.css.prefers-color-scheme.content-override` to `0`
-in the profile's `user.js` before starting, which is what `next-themes` reads when
-its stored theme is `system`.
+For the mobile render, use a narrower screen and window (`-screen 0 900x1900x24`,
+`--window-size=390,1500`) and a **separate profile directory**; reusing one
+profile for a second concurrent run produces no file at all, silently.
+
+**Do not attempt a dark render this way.** Earlier versions of this document
+suggested setting `layout.css.prefers-color-scheme.content-override` to `0` in the
+profile's `user.js`. That does not work: the pref lands in `prefs.js` and Firefox
+still reports a light preference, so the resulting file is a light render with a
+dark name. See §3. A dark artefact needs a real browser session that can set
+`localStorage`, which `--screenshot` cannot do.
