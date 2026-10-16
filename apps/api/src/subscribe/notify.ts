@@ -30,6 +30,7 @@ import { utcDay } from "@allclear/shared";
 
 import {
   consumeEmailQuota,
+  DAILY_EMAIL_QUOTA,
   emailSenderFromEnv,
   redactEmail,
   type EmailSender,
@@ -38,8 +39,6 @@ import { DEFAULT_TOKEN_TTL_SECONDS, signUnsubscribeToken } from "./tokens";
 
 /** Ceiling on recipients for a single event, to bound one request's work. */
 export const MAX_RECIPIENTS_PER_EVENT = 500;
-/** Global daily send ceiling. */
-export const DEFAULT_DAILY_EMAIL_QUOTA = 2000;
 
 export interface NotifyContext {
   db: D1Database;
@@ -129,7 +128,7 @@ export async function notifyChange(
   }
 
   const maxPerEvent = ctx.maxPerEvent ?? MAX_RECIPIENTS_PER_EVENT;
-  const dailyQuota = ctx.dailyQuota ?? DEFAULT_DAILY_EMAIL_QUOTA;
+  const dailyQuota = ctx.dailyQuota ?? DAILY_EMAIL_QUOTA;
   const ttl = ctx.tokenTtlSeconds ?? DEFAULT_TOKEN_TTL_SECONDS;
 
   // A subscriber matches when they follow any component this change touches, or

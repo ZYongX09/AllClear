@@ -139,6 +139,17 @@ export interface QuotaDecision {
   limit: number;
 }
 
+/**
+ * The global daily send ceiling.
+ *
+ * It lives here, next to the counter it bounds, rather than beside either of the
+ * two callers. Both the subscribe route and the notification path need the same
+ * number, and the admin view reports it — three readers is exactly the situation
+ * where two copies drift and the operator is told a limit the code does not
+ * enforce.
+ */
+export const DAILY_EMAIL_QUOTA = 2000;
+
 /** Consume one send from the global daily budget. */
 export async function consumeEmailQuota(
   db: D1Database,

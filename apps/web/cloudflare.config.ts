@@ -41,6 +41,20 @@ export default defineConfig({
       // it and attaches it when calling the API Worker.
       INTERNAL_KEY: bindings.secret(),
 
+      // Gates the /admin UI, and is deliberately a *different* secret from
+      // INTERNAL_KEY. The two answer different questions: INTERNAL_KEY says "this
+      // request comes from the web Worker", which is a property of the
+      // deployment; ADMIN_TOKEN says "a human who knows it is operating this
+      // console", which is a property of the request. Sharing one value would
+      // mean every operator knows the credential the Worker uses to reach the
+      // API, and rotating it to revoke a person would break the site.
+      //
+      // Unset means the admin console refuses everything rather than opening. The
+      // console exists because a Server Action is a public POST endpoint: it runs
+      // on this Worker and attaches INTERNAL_KEY itself, so without a gate here
+      // anyone who can reach the page can write to the API.
+      ADMIN_TOKEN: bindings.secret(),
+
       // Which status page this deployment's landing page links to. The baseline
       // migration seeds `example`, so a fresh checkout works without further
       // configuration; an empty value renders the "not configured" hint instead

@@ -526,3 +526,155 @@ describe("sections", () => {
     expect(after!.section_id).toBeNull();
   });
 });
+
+describe("components", () => {
+  it("distinguishes an absent section from an explicit null", async () => {
+    // Three meanings share one field, and collapsing any two of them breaks a
+    // real operation: absent means "leave the grouping alone", null means "move
+    // to the page root", a string means "move into that section".
+    const page = await createPage();
+    const section = (await (
+      await callAdmin(`/internal/admin/pages/${page.slug}/sections`, "POST", { name: "Core" })
+    ).json()) as { publicId: string };
+    const sectionRow = await env.DB.prepare("SELECT id FROM section WHERE public_id = ?1")
+      .bind(section.publicId)
+      .first<{ id: number }>();
+
+    const created = (await (
+      await callAdmin(`/internal/admin/pages/${page.slug}/components`, "POST", {
+        name: "Grouped",
+        sectionPublicId: section.publicId,
+      })
+    ).json()) as { publicId: string };
+
+    const sectionIdOf = async (): Promise<number | null> => {
+      const row = await env.DB.prepare("SELECT section_id FROM component WHERE public_id = ?1")
+        .bind(created.publicId)
+        .first<{ section_id: number | null }>();
+      return row?.section_id ?? null;
+    };
+
+    expect(await sectionIdOf()).toBe(sectionRow!.id);
+
+    // Absent: the grouping survives a rename.
+    await callAdmin(`/internal/admin/components/${created.publicId}`, "PATCH", { name: "Renamed" });
+    expect(await sectionIdOf()).toBe(sectionRow!.id);
+
+    // Explicit null: moved to the page root.
+    await callAdmin(`/internal/admin/components/${created.publicId}`, "PATCH", {
+      sectionPublicId: null,
+    });
+    expect(await sectionIdOf()).toBeNull();
+  });
+});
+
+describe("pages", () => {
+  it("lists every page with the counts the admin index shows", async () => {
+    const page = await createPage();
+    await createComponent(page.id);
+    await callAdmin(`/internal/admin/pages/${page.slug}/sections`, "POST", { name: "Core" });
+
+    const response = await callAdmin("/internal/admin/pages", "GET");
+    expect(response.status).toBe(200);
+
+    const body = (await response.json()) as {
+      ok: boolean;
+      pages: Array<{ slug: string; section_count: number; component_count: number }>;
+    };
+    const found = body.pages.find((row) => row.slug === page.slug);
+
+    expect(body.ok).toBe(true);
+    expect(found).toBeDefined();
+    expect(found!.section_count).toBe(1);
+    expect(found!.component_count).toBe(1);
+  });
+
+  it("creates a page and publishes an empty snapshot for it", async () => {
+    const slug = `created-${Date.now().toString(36)}`;
+    const response = await callAdmin("/internal/admin/pages", "POST", { slug, name: "Created" });
+    expect(response.status).toBe(201);
+
+    // A brand new page is legitimately empty, and that is a real document: the
+    // first read must be a KV hit rather than a rebuild that finds nothing.
+    const snapshot = (await readKvSnapshot(slug)) as { name: string; components: unknown[] } | null;
+    expect(snapshot).not.toBeNull();
+    expect(snapshot!.name).toBe("Created");
+    expect(snapshot!.components).toEqual([]);
+
+    const version = await env.DB.prepare("SELECT snapshot_version FROM page WHERE slug = ?1")
+      .bind(slug)
+      .first<{ snapshot_version: number }>();
+    expect(version!.snapshot_version).toBe(1);
+  });
+
+  it("rejects a duplicate slug as bad input rather than a server error", async () => {
+    const page = await createPage();
+
+    const response = await callAdmin("/internal/admin/pages", "POST", {
+      slug: page.slug,
+      name: "Collision",
+    });
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { field: string | null };
+    expect(body.field).toBe("slug");
+  });
+
+  it("rejects a slug that is not a URL-safe word sequence", async () => {
+    const response = await callAdmin("/internal/admin/pages", "POST", {
+      slug: "Not A Slug",
+      name: "Bad",
+    });
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { field: string | null };
+    expect(body.field).toBe("slug");
+  });
+
+  it("renames a page and advances the version", async () => {
+    const page = await createPage();
+    const before = await pageVersion(page.id);
+
+    const response = await callAdmin(`/internal/admin/pages/${page.slug}`, "PATCH", {
+      name: "Renamed Page",
+    });
+
+    expect(response.status).toBe(200);
+    expect(await pageVersion(page.id)).toBe(before + 1);
+    const snapshot = (await readKvSnapshot(page.slug)) as { name: string };
+    expect(snapshot.name).toBe("Renamed Page");
+  });
+});
+
+describe("the send budget", () => {
+  it("reports today's usage against the ceiling the code enforces", async () => {
+    const response = await callAdmin("/internal/admin/email-quota", "GET");
+    expect(response.status).toBe(200);
+
+    const body = (await response.json()) as {
+      ok: boolean;
+      day: string;
+      sent: number;
+      limit: number;
+      remaining: number;
+    };
+
+    expect(body.ok).toBe(true);
+    expect(body.day).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(body.sent).toBeGreaterThanOrEqual(0);
+    expect(body.limit).toBe(2000);
+    expect(body.remaining).toBe(body.limit - body.sent);
+  });
+
+  it("counts a day that has not sent anything as zero rather than failing", async () => {
+    // The row is created on the first send, so a fresh day has no row at all.
+    // Reporting an error there would make the panel look broken every midnight.
+    await env.DB.prepare("DELETE FROM email_quota").run();
+
+    const response = await callAdmin("/internal/admin/email-quota", "GET");
+    const body = (await response.json()) as { sent: number; remaining: number };
+
+    expect(response.status).toBe(200);
+    expect(body.sent).toBe(0);
+    expect(body.remaining).toBe(2000);
+  });
+});

@@ -14,3 +14,7 @@ export * from "./uptime";
 // The Atom feed is here for the same reason as the rest: it is a pure function of
 // the snapshot, and both Workers serve it. See the header of `feed.ts`.
 export * from "./feed";
+// The v1 capacity boundaries. Not maths, but here for the same reason: the Worker
+// and the console have to enforce the same numbers, and neither may import the
+// other. See the header of `limits.ts`.
+export * from "./limits";

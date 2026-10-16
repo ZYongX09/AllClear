@@ -22,6 +22,8 @@
 
 import type { ReadResult, Snapshot, SnapshotDay } from "@allclear/shared";
 
+import { handleAdminRequest } from "./admin-stub";
+
 const DAY = 86_400;
 
 /**
@@ -243,6 +245,11 @@ function html(title: string, message: string, status = 200): Response {
 export default {
   async fetch(request: Request): Promise<Response> {
     const { pathname } = new URL(request.url);
+
+    // The console's write surface lives in its own module. Asked first, and it
+    // answers only for `/internal/admin*`, so it cannot shadow a public route.
+    const admin = await handleAdminRequest(request);
+    if (admin !== null) return admin;
 
     if (pathname === "/api/status/fixture" || pathname === "/api/status/fixture/snapshot.json") {
       return json(buildFixture(Math.floor(Date.now() / 1000)));

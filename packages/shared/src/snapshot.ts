@@ -142,8 +142,16 @@ export interface Snapshot {
   changes: SnapshotChange[];
 }
 
-/** Which step of the read chain produced the data. */
-export type SnapshotSource = "kv-fresh" | "d1-rebuild" | "kv-last" | "none";
+/**
+ * Which step of the read chain produced the data.
+ *
+ * `cache` is the colo-local copy written by the same call that writes KV. It is
+ * only reached when KV has missed, and it is reported as its own value rather
+ * than folded into `kv-fresh` because it is a different claim: KV is the
+ * authority for every reader, whereas this copy is known only to the data centre
+ * that wrote it. See docs/spec/snapshot.md.
+ */
+export type SnapshotSource = "kv-fresh" | "cache" | "d1-rebuild" | "kv-last" | "none";
 
 export interface ReadResult {
   snapshot: Snapshot | null;

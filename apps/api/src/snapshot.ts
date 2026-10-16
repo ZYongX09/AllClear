@@ -9,10 +9,13 @@
  *
  *   1. KV fresh   — the normal path. Does not touch D1 at all.
  *   2. D1 rebuild — reached on a KV miss (cold cache, evicted key). Rebuilds the
- *                   snapshot and repopulates both keys.
+ *                   snapshot and repopulates KV and the colo-local copy.
  *   3. KV last    — reached only when D1 is also unavailable. Serves the last
  *                   known good snapshot.
- *   4. none       — nothing to serve. The caller must render an explicit
+ *   4. cache      — reached when KV itself could not answer, which is the one
+ *                   failure `:last` cannot cover because `:last` is also in KV.
+ *                   See `cache.ts`.
+ *   5. none       — nothing to serve. The caller must render an explicit
  *                   "unavailable" state rather than an empty-but-plausible page.
  *
  * ## `stale` means "unconfirmed", not "old"
@@ -66,6 +69,8 @@ import {
   type SnapshotSource,
   type Status,
 } from "@allclear/shared";
+
+import { readSnapshotFromCache, writeSnapshotToCache } from "./cache";
 
 export { freshKey, lastKey } from "@allclear/shared";
 export type { ReadResult, Snapshot } from "@allclear/shared";
@@ -476,19 +481,23 @@ export async function buildSnapshot(
 }
 
 /**
- * Persist a snapshot to both keys.
+ * Persist a snapshot to both keys, and to the colo-local cache.
  *
  * `snapshot:<slug>:last` is written by the same call that writes
  * `snapshot:<slug>`. That is not incidental: the fallback path in
  * `readSnapshot` depends on the key existing, so the write path has to maintain
  * it deliberately. Writing only the fresh key would leave the documented
  * fallback with no write contract behind it.
+ *
+ * The cache write is best-effort and cannot fail this call. See `cache.ts` for
+ * what that layer is for and why it is deliberately not an authority.
  */
 export async function writeSnapshot(kv: KVNamespace, snapshot: Snapshot): Promise<void> {
   const body = JSON.stringify(snapshot);
   await Promise.all([
     kv.put(freshKey(snapshot.slug), body),
     kv.put(lastKey(snapshot.slug), body),
+    writeSnapshotToCache(snapshot),
   ]);
 }
 
@@ -549,8 +558,8 @@ export async function readSnapshot(
     errors.push(`d1-rebuild: ${describe(error)}`);
   }
 
-  // 3. D1 unavailable — fall back to the last known good snapshot. This is the
-  //    only path where `stale` is a real signal: we are serving data whose
+  // 3. D1 unavailable — fall back to the last known good snapshot. This is one of
+  //    the two paths where `stale` is a real signal: we are serving data whose
   //    currency we could not check.
   try {
     const last = await readKv(kv, lastKey(slug));
@@ -559,7 +568,17 @@ export async function readSnapshot(
     errors.push(`kv-last: ${describe(error)}`);
   }
 
-  // 4. Nothing left. Report that plainly.
+  // 4. KV could not answer at all — try this data centre's own copy. This is the
+  //    one failure `kv-last` cannot cover, because `kv-last` is also in KV. Like
+  //    `kv-last` it is reported stale: the chain could not confirm currency.
+  try {
+    const local = await readSnapshotFromCache(slug);
+    if (local) return finish(local, "cache", true);
+  } catch (error) {
+    errors.push(`cache: ${describe(error)}`);
+  }
+
+  // 5. Nothing left. Report that plainly.
   return finish(null, "none", true);
 }
 

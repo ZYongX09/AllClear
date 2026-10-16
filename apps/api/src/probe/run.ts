@@ -29,12 +29,17 @@
  * replayed as a *new* observation and counted twice.
  */
 
+import { MAX_ENABLED_TARGETS } from "@allclear/shared";
+
 import { applyProbeObservation } from "./transition";
 import { assertProbeUrlAllowed, fetchProbe, ProbeUrlRejected } from "../lib/ssrf";
 import { ulid } from "../lib/ulid";
 
-/** Hard cap on enabled targets, from the plan's v1 capacity boundary. */
-export const MAX_ENABLED_TARGETS = 20;
+// Re-exported rather than only imported. The value now lives in
+// `@allclear/shared` because the console has to enforce the same cap, and it was
+// defined here first — so this keeps the existing importers working while making
+// the shared copy the single source. See `shared/src/limits.ts`.
+export { MAX_ENABLED_TARGETS };
 
 export interface ProbeRunOptions {
   now?: number;

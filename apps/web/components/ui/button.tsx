@@ -17,6 +17,11 @@ const buttonVariants = cva(
         outline:
           "border border-slate-300 bg-transparent hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800",
         ghost: "hover:bg-slate-100 dark:hover:bg-slate-800",
+        // Used by the admin console's deletes. A destructive action that looks
+        // like every other button is one misclick away from removing a
+        // component, and colour is the only warning a button can give before
+        // the click rather than after it.
+        destructive: "bg-red-600 text-white hover:bg-red-700 dark:bg-red-700 dark:hover:bg-red-600",
       },
       size: {
         default: "h-9 px-4 py-2",

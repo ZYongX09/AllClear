@@ -39,7 +39,7 @@ import { Hono } from "hono";
 
 import { consumeRateLimit } from "../lib/rate-limit";
 import { ulid } from "../lib/ulid";
-import { consumeEmailQuota, emailSenderFromEnv } from "./email";
+import { consumeEmailQuota, DAILY_EMAIL_QUOTA, emailSenderFromEnv } from "./email";
 import { newConfirmToken, verifyUnsubscribeToken } from "./tokens";
 
 /** Hard cap on confirmed subscribers per page. */
@@ -51,8 +51,6 @@ export const SUBSCRIBE_IP_LIMIT = 10;
 export const SUBSCRIBE_WINDOW_SECONDS = 3600;
 /** How long a confirmation link stays usable. */
 export const CONFIRM_TOKEN_TTL_SECONDS = 48 * 3600;
-/** Global daily send ceiling. Mirrors the default in `notify.ts`. */
-export const DAILY_EMAIL_QUOTA = 2000;
 export const MAX_EMAIL_LENGTH = 254;
 const MAX_LOCAL_PART = 64;
 

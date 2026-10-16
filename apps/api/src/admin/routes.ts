@@ -14,10 +14,18 @@
 
 import { Hono } from "hono";
 
+import {
+  MAX_PROBE_INTERVAL_SECONDS,
+  MIN_PROBE_INTERVAL_SECONDS,
+  utcDay,
+} from "@allclear/shared";
+
 import { notifyChangeSafely, type NotifyEvent } from "../subscribe/notify";
+import { DAILY_EMAIL_QUOTA, readEmailQuota } from "../subscribe/email";
 import * as service from "./service";
 import {
   asObject,
+  nullableString,
   optionalBool,
   optionalEnum,
   optionalInt,
@@ -25,6 +33,7 @@ import {
   optionalStringArray,
   requireEnum,
   requireInt,
+  requireSlug,
   requireString,
   ValidationError,
 } from "./validate";
@@ -65,11 +74,59 @@ export function createAdminRoutes(): Hono<{ Bindings: Env }> {
     notifyChangeSafely(c.env, publicId, event, Math.floor(Date.now() / 1000));
 
   // -------------------------------------------------------------------------
+  // Read: the page list, and the send budget
+  // -------------------------------------------------------------------------
+
+  /**
+   * Every page, with the counts an operator needs to choose one.
+   *
+   * The counts are subqueries rather than a second round trip per page: the
+   * admin index renders a table, and a table that costs one query per row is the
+   * shape that turns into a slow page as soon as someone has more than a handful
+   * of status pages. `enabled_probe_count` counts only enabled targets because
+   * that is the number the v1 capacity boundary is about.
+   */
+  app.get("/pages", async (c) => {
+    const now = Math.floor(Date.now() / 1000);
+    const result = await c.env.DB.prepare(
+      `SELECT p.public_id, p.slug, p.name, p.snapshot_version, p.updated_at,
+              (SELECT COUNT(*) FROM section s WHERE s.page_id = p.id) AS section_count,
+              (SELECT COUNT(*) FROM component cp WHERE cp.page_id = p.id) AS component_count,
+              (SELECT COUNT(*) FROM probe_target t
+                 JOIN component cp2 ON cp2.id = t.component_id
+                WHERE cp2.page_id = p.id AND t.enabled = 1) AS enabled_probe_count,
+              (SELECT COUNT(*) FROM change ch
+                WHERE ch.page_id = p.id AND (ch.ends_at IS NULL OR ch.ends_at >= ?1)) AS open_change_count
+         FROM page p
+        ORDER BY p.id`,
+    )
+      .bind(now)
+      .all();
+
+    return c.json({ ok: true, pages: result.results });
+  });
+
+  /**
+   * How much of today's send budget has been spent.
+   *
+   * The ceiling is a hard stop: once `email_quota` reaches it, notification
+   * sends are skipped for the rest of the UTC day and subscribers silently stop
+   * hearing about incidents. That failure is invisible from the outside — the
+   * page still updates — so the number has to be visible somewhere, and this is
+   * that somewhere.
+   */
+  app.get("/email-quota", async (c) => {
+    const day = utcDay(Math.floor(Date.now() / 1000));
+    const sent = await readEmailQuota(c.env.DB, day);
+    return c.json({ ok: true, day, sent, limit: DAILY_EMAIL_QUOTA, remaining: Math.max(0, DAILY_EMAIL_QUOTA - sent) });
+  });
+
+  // -------------------------------------------------------------------------
   // Read: the admin view of a page
   // -------------------------------------------------------------------------
 
   app.get("/pages/:slug", async (c) => {
-    const slug = c.req.param("slug");
+    const slug = requireSlug({ slug: c.req.param("slug") });
     const page = await c.env.DB.prepare(
       "SELECT id, public_id, slug, name, snapshot_version, updated_at FROM page WHERE slug = ?1",
     )
@@ -85,7 +142,7 @@ export function createAdminRoutes(): Hono<{ Bindings: Env }> {
 
     if (!page) return c.json({ ok: false, error: "page_not_found" }, 404);
 
-    const [sections, components, probes, changes] = await c.env.DB.batch([
+    const [sections, components, probes, changes, impacts] = await c.env.DB.batch([
       c.env.DB
         .prepare(
           "SELECT public_id, name, description, order_id FROM section WHERE page_id = ?1 ORDER BY order_id, id",
@@ -125,6 +182,22 @@ export function createAdminRoutes(): Hono<{ Bindings: Env }> {
             LIMIT 100`,
         )
         .bind(page.id),
+      // Only hand-entered impacts. Probe-generated ones are owned by the probe
+      // state machine — an operator who could close one by hand would be closing
+      // an impact the next probe run is about to reopen, so they are shown but
+      // not editable. `probe_target_id IS NULL` is what separates the two, and
+      // it is the same predicate the API uses to decide editability.
+      c.env.DB
+        .prepare(
+          `SELECT i.public_id, i.severity, i.start_at, i.end_at, i.estimated,
+                  c.public_id AS component_public_id
+             FROM impact i
+             JOIN component c ON c.id = i.component_id
+            WHERE c.page_id = ?1 AND i.probe_target_id IS NULL
+            ORDER BY i.start_at DESC, i.id DESC
+            LIMIT 100`,
+        )
+        .bind(page.id),
     ]);
 
     return c.json({
@@ -134,7 +207,31 @@ export function createAdminRoutes(): Hono<{ Bindings: Env }> {
       components: components.results,
       probes: probes.results,
       changes: changes.results,
+      impacts: impacts.results,
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // Pages
+  // -------------------------------------------------------------------------
+
+  app.post("/pages", async (c) => {
+    const body = asObject(await c.req.json());
+    const result = await service.createPage(ctxOf(c), {
+      slug: requireSlug(body),
+      name: requireString(body, "name", { max: 120 }),
+    });
+    return c.json({ ok: true, ...result }, 201);
+  });
+
+  app.patch("/pages/:slug", async (c) => {
+    const body = asObject(await c.req.json());
+    await service.updatePage(ctxOf(c), requireSlug({ slug: c.req.param("slug") }), {
+      ...(optionalString(body, "name", { max: 120 }) === undefined
+        ? {}
+        : { name: optionalString(body, "name", { max: 120 })! }),
+    });
+    return c.json({ ok: true });
   });
 
   // -------------------------------------------------------------------------
@@ -190,16 +287,19 @@ export function createAdminRoutes(): Hono<{ Bindings: Env }> {
 
   app.patch("/components/:publicId", async (c) => {
     const body = asObject(await c.req.json());
-    const sectionRaw = body["sectionPublicId"];
+    // Three distinct meanings have to survive here: absent (leave the section
+    // alone), null (move the component to the page root), and a string (move it
+    // into that section). `nullableString` is the helper that keeps them apart;
+    // collapsing absent and null would make "move to the page root" impossible
+    // to express.
+    const sectionPublicId = nullableString(body, "sectionPublicId");
     const description = optionalString(body, "description", { max: 2000 });
     const name = optionalString(body, "name", { max: 120 });
 
     await service.updateComponent(ctxOf(c), c.req.param("publicId"), {
       ...(name === undefined ? {} : { name }),
       ...(description === undefined ? {} : { description }),
-      ...(sectionRaw === undefined
-        ? {}
-        : { sectionPublicId: sectionRaw === null ? null : requireString(body, "sectionPublicId") }),
+      ...(sectionPublicId === undefined ? {} : { sectionPublicId }),
       ...(optionalInt(body, "orderId") === undefined ? {} : { orderId: optionalInt(body, "orderId")! }),
     });
     return c.json({ ok: true });
@@ -333,9 +433,9 @@ export function createAdminRoutes(): Hono<{ Bindings: Env }> {
       ...(optionalInt(body, "timeoutMs", { min: 1000, max: 30_000 }) === undefined
         ? {}
         : { timeoutMs: optionalInt(body, "timeoutMs", { min: 1000, max: 30_000 })! }),
-      ...(optionalInt(body, "intervalSeconds", { min: 60, max: 86_400 }) === undefined
+      ...(optionalInt(body, "intervalSeconds", { min: MIN_PROBE_INTERVAL_SECONDS, max: MAX_PROBE_INTERVAL_SECONDS }) === undefined
         ? {}
-        : { intervalSeconds: optionalInt(body, "intervalSeconds", { min: 60, max: 86_400 })! }),
+        : { intervalSeconds: optionalInt(body, "intervalSeconds", { min: MIN_PROBE_INTERVAL_SECONDS, max: MAX_PROBE_INTERVAL_SECONDS })! }),
       ...(optionalInt(body, "failureThreshold", { min: 1, max: 10 }) === undefined
         ? {}
         : { failureThreshold: optionalInt(body, "failureThreshold", { min: 1, max: 10 })! }),
@@ -356,7 +456,7 @@ export function createAdminRoutes(): Hono<{ Bindings: Env }> {
     const url = optionalString(body, "url", { max: 2000 });
     const expectedStatus = optionalInt(body, "expectedStatus", { min: 100, max: 599 });
     const timeoutMs = optionalInt(body, "timeoutMs", { min: 1000, max: 30_000 });
-    const intervalSeconds = optionalInt(body, "intervalSeconds", { min: 60, max: 86_400 });
+    const intervalSeconds = optionalInt(body, "intervalSeconds", { min: MIN_PROBE_INTERVAL_SECONDS, max: MAX_PROBE_INTERVAL_SECONDS });
     const failureThreshold = optionalInt(body, "failureThreshold", { min: 1, max: 10 });
     const recoveryThreshold = optionalInt(body, "recoveryThreshold", { min: 1, max: 10 });
     const enabled = optionalBool(body, "enabled");

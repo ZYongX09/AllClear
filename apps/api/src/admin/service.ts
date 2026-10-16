@@ -62,17 +62,31 @@ function isFaultSeverity(value: string): value is FaultSeverity {
 
 interface PageRow {
   id: number;
+  public_id: string;
   slug: string;
   name: string;
 }
 
 async function requirePage(db: D1Database, slug: string): Promise<PageRow> {
   const page = await db
-    .prepare("SELECT id, slug, name FROM page WHERE slug = ?1")
+    .prepare("SELECT id, public_id, slug, name FROM page WHERE slug = ?1")
     .bind(slug)
     .first<PageRow>();
   if (!page) throw new ValidationError(`no page with slug ${slug}`, "slug");
   return page;
+}
+
+/**
+ * D1 reports a violated constraint through the error message, not a code.
+ *
+ * This matters for exactly one case: a duplicate slug. Left alone it surfaces as
+ * a 500 carrying the raw SQLite text, which tells an operator nothing they can
+ * act on. Recognising it turns "UNIQUE constraint failed: page.slug" into a 400
+ * naming the field, which is what the rest of this API does with bad input.
+ */
+function isUniqueViolation(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("UNIQUE constraint failed");
 }
 
 async function componentIdByPublicId(db: D1Database, publicId: string): Promise<number> {
@@ -129,6 +143,78 @@ async function audit(
       ctx.now,
     )
     .run();
+}
+
+// ---------------------------------------------------------------------------
+// Pages
+// ---------------------------------------------------------------------------
+
+export interface PageInput {
+  slug: string;
+  name: string;
+}
+
+/**
+ * Create a status page.
+ *
+ * The baseline migration seeds one page, which is enough for the deployment this
+ * was written for and not enough for a second one. Without this the admin UI
+ * could only edit the page that happened to be seeded, so a new deployment would
+ * have to insert its page by hand.
+ *
+ * `snapshot_version` starts at 0 and `publishSnapshot` immediately advances it to
+ * 1, so the very first read is a KV hit rather than a rebuild. A brand new page
+ * has an empty snapshot and that is a legitimate document: zero components is
+ * not the same as an unavailable page.
+ */
+export async function createPage(
+  ctx: WriteContext,
+  input: PageInput,
+): Promise<{ publicId: string }> {
+  const publicId = (ctx.newId ?? ulid)();
+  try {
+    await ctx.db
+      .prepare(
+        `INSERT INTO page (public_id, slug, name, snapshot_version, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 0, ?4, ?4)`,
+      )
+      .bind(publicId, input.slug, input.name, ctx.now)
+      .run();
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      throw new ValidationError(`a page with slug ${input.slug} already exists`, "slug");
+    }
+    throw error;
+  }
+
+  await audit(ctx, "page.create", "page", publicId, input);
+  await publishSnapshot(ctx, input.slug);
+  return { publicId };
+}
+
+/**
+ * Rename a page.
+ *
+ * The slug is deliberately not editable. It is the public URL (`/status/<slug>`),
+ * the KV key, and the identifier in every RSS reader's subscription list, so
+ * changing it silently breaks bookmarks and feeds. A slug change is a
+ * create-and-retire operation, not a field edit.
+ */
+export async function updatePage(
+  ctx: WriteContext,
+  slug: string,
+  input: { name?: string },
+): Promise<void> {
+  const page = await requirePage(ctx.db, slug);
+  if (input.name === undefined) return;
+
+  await withPublish(ctx, slug, async () => {
+    await ctx.db
+      .prepare("UPDATE page SET name = ?2, updated_at = ?3 WHERE id = ?1")
+      .bind(page.id, input.name, ctx.now)
+      .run();
+    await audit(ctx, "page.update", "page", page.public_id, input);
+  });
 }
 
 // ---------------------------------------------------------------------------
