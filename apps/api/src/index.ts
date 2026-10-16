@@ -246,9 +246,9 @@ async function repairSnapshots(env: Env): Promise<void> {
  *
  * The full recompute is hourly rather than per-tick. It exists to finalise days
  * that passed quietly, and running it every minute would recompute two days of
- * every component sixty times an hour to reach the same answer. Transitions
- * still recompute their own components immediately, so "today" is never a
- * minute behind.
+ * every component sixty times an hour to reach the same answer. Applied probe
+ * observations still recompute their own components before publication, so the
+ * snapshot includes their latest coverage even without an impact transition.
  */
 async function scheduledPass(env: Env, now: number): Promise<void> {
   let probeSummary: Awaited<ReturnType<typeof runProbes>> | null = null;
@@ -275,7 +275,9 @@ async function scheduledPass(env: Env, now: number): Promise<void> {
       }
     }
     try {
-      await republishPages(env, probeSummary.transitionedPageIds, now);
+      // Every committed observation changes public probe evidence and coverage,
+      // even when no impact opens or closes. Publish after the rollups above.
+      await republishPages(env, probeSummary.affectedPageIds, now);
     } catch (error) {
       console.error("republish after probe run failed", message(error));
     }

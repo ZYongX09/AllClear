@@ -65,12 +65,10 @@ export interface ProbeRunSummary {
   /**
    * Pages where a target actually opened or closed an impact.
    *
-   * Kept separate from `affectedPageIds` because the two drive different work.
-   * Uptime is recomputed for every component that produced an observation, since
-   * even a successful probe changes the coverage evidence. A snapshot is only
-   * republished when public output changed, and republishing on every
-   * observation would rewrite the KV payload once a minute per target for no
-   * reason.
+   * Kept separate from `affectedPageIds` for transition reporting. Every applied
+   * observation changes public freshness and coverage evidence, so rollups and
+   * snapshot publication use the affected component/page lists even when no
+   * impact opens or closes. Page ids are deduplicated for one publication per run.
    */
   transitionedPageIds: number[];
   /** Component ids whose daily uptime must be recomputed after this run. */

@@ -1,8 +1,22 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { deriveSnapshotComponent, utcDay, type ReadResult } from "@allclear/shared";
+import { createExecutionContext, createScheduledController } from "cloudflare:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import worker from "../src/index";
 import { runProbes } from "../src/probe/run";
+import { buildSnapshot, writeSnapshot } from "../src/snapshot";
 import { testEnv as env } from "./env";
-import { createComponent, createPage, createProbeTarget, fakeFetch, T0 } from "./helpers";
+import {
+  callApi,
+  createComponent,
+  createPage,
+  createProbeTarget,
+  fakeFetch,
+  pageVersion,
+  readKvSnapshot,
+  T0,
+  workerEnv,
+} from "./helpers";
 
 /**
  * The probe scheduler.
@@ -211,8 +225,8 @@ describe("scheduling", () => {
     const { fetchImpl } = fakeFetch();
     const summary = await runProbes(env.DB, { now: T0, fetchImpl });
 
-    // Uptime is recomputed for every observation, because even a success is
-    // coverage evidence; a snapshot is only republished when output changed.
+    // Even a success changes public freshness and coverage evidence, so it
+    // requires rollup recomputation and publication without an impact transition.
     expect(summary.affectedPageIds).toEqual([page.id]);
     expect(summary.affectedComponentIds).toEqual([component.id]);
     expect(summary.transitionedPageIds).toEqual([]);
@@ -332,6 +346,118 @@ describe("replay", () => {
     // The counter did not move twice, and the observation was not stored twice.
     expect(state.consecutive_successes).toBe(1);
     expect(await resultCount(target.id)).toBe(1);
+  });
+});
+
+describe("scheduled snapshot publication", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  async function tick(now: number, ok = true): Promise<void> {
+    vi.spyOn(Date, "now").mockReturnValue(now * 1000);
+    vi.stubGlobal("fetch", fakeFetch({ ok }).fetchImpl);
+    await worker.scheduled(createScheduledController(), workerEnv, createExecutionContext());
+  }
+
+  async function publicSnapshot(slug: string): Promise<NonNullable<ReadResult["snapshot"]>> {
+    const response = await callApi(`/api/status/${slug}`);
+    expect(response.status).toBe(200);
+    const result = await response.json() as ReadResult;
+    // A D1 rebuild on read would hide the missing cron publication.
+    expect(result.source).toBe("kv-fresh");
+    expect(result.snapshot).not.toBeNull();
+    expect(await readKvSnapshot(slug, `snapshot:${slug}:last`)).toEqual(result.snapshot);
+    return result.snapshot!;
+  }
+
+  it("refreshes successful probe evidence and rollups on successive ticks without aging to unknown", async () => {
+    const page = await createPage();
+    const component = await createComponent(page.id, { availableSince: T0 });
+    const target = await createProbeTarget(component.id);
+    // Seed the same cached, never-probed document the admin path publishes.
+    await writeSnapshot(env.SNAPSHOT_KV, await buildSnapshot(env.DB, page.slug, { now: T0 }));
+    expect((await publicSnapshot(page.slug)).components[0]!.probe).toBeNull();
+
+    let firstHealthy: NonNullable<ReadResult["snapshot"]> | undefined;
+    for (let index = 0; index < 5; index += 1) {
+      const now = T0 + index * 60;
+      await tick(now);
+      const snapshot = await publicSnapshot(page.slug);
+      expect(snapshot.snapshotVersion).toBe(2 + index);
+      expect(await pageVersion(page.id)).toBe(snapshot.snapshotVersion);
+      expect(snapshot.generatedAt).toBe(now);
+      expect(snapshot.sourceUpdatedAt).toBe(now);
+      const built = snapshot.components[0]!;
+      expect(built.probe).toEqual({ targetPublicId: target.publicId, lastProbeAt: now, ok: true });
+      expect(deriveSnapshotComponent(built, now + 59)).toEqual({
+        status: "operational", reason: "monitoring_ok",
+      });
+      expect(built.days.find((day) => day.day === utcDay(now))).toEqual({
+        day: utcDay(now),
+        uptime: index === 0 ? null : 1,
+        status: index === 0 ? "unknown" : "operational",
+        coveredSeconds: index * 60,
+        unknownSeconds: 0,
+      });
+      firstHealthy ??= snapshot;
+    }
+
+    // The original healthy payload would be stale by now; the latest one is not.
+    expect(deriveSnapshotComponent(firstHealthy!.components[0]!, T0 + 240).reason)
+      .toBe("monitoring_stale");
+    expect(await openImpacts(target.id)).toEqual([]);
+    expect((await stateOf(target.id)).transition_seq).toBe(5);
+    expect(await resultCount(target.id)).toBe(5);
+
+    // A tick with no due observation must not bump or republish this page.
+    await tick(T0 + 270);
+    expect((await publicSnapshot(page.slug)).snapshotVersion).toBe(6);
+    expect(await pageVersion(page.id)).toBe(6);
+  });
+
+  it("still publishes opening and closing at their thresholds and first-observation boundaries", async () => {
+    const page = await createPage();
+    const component = await createComponent(page.id, { availableSince: T0 });
+    const target = await createProbeTarget(component.id, {
+      failureThreshold: 2, recoveryThreshold: 2,
+    });
+    await writeSnapshot(env.SNAPSHOT_KV, await buildSnapshot(env.DB, page.slug, { now: T0 }));
+
+    await tick(T0, false);
+    let snapshot = await publicSnapshot(page.slug);
+    expect(snapshot.components[0]!.probe?.ok).toBe(false);
+    expect(snapshot.components[0]!.impacts).toEqual([]);
+    expect(await openImpacts(target.id)).toEqual([]);
+
+    await tick(T0 + 60, false);
+    snapshot = await publicSnapshot(page.slug);
+    expect(snapshot.components[0]!.impacts).toEqual([
+      { severity: "partial_outage", startsAt: T0, endsAt: null },
+    ]);
+    expect(deriveSnapshotComponent(snapshot.components[0]!, T0 + 60).status).toBe("partial_outage");
+
+    await tick(T0 + 120);
+    snapshot = await publicSnapshot(page.slug);
+    expect(snapshot.components[0]!.probe?.lastProbeAt).toBe(T0 + 120);
+    expect(deriveSnapshotComponent(snapshot.components[0]!, T0 + 120).status).toBe("partial_outage");
+    expect((await openImpacts(target.id))[0]!.end_at).toBeNull();
+
+    await tick(T0 + 180);
+    snapshot = await publicSnapshot(page.slug);
+    expect(snapshot.snapshotVersion).toBe(5);
+    expect(await pageVersion(page.id)).toBe(5);
+    expect(snapshot.components[0]!.impacts).toEqual([]);
+    expect(deriveSnapshotComponent(snapshot.components[0]!, T0 + 180).status).toBe("operational");
+    expect(await openImpacts(target.id)).toEqual([{ start_at: T0, end_at: T0 + 120 }]);
+    const { results } = await env.DB.prepare(
+      "SELECT from_state, to_state FROM probe_transition WHERE probe_target_id = ?1 ORDER BY transition_seq",
+    ).bind(target.id).all<{ from_state: string; to_state: string }>();
+    expect(results).toEqual([
+      { from_state: "up", to_state: "down" },
+      { from_state: "down", to_state: "up" },
+    ]);
   });
 });
 
