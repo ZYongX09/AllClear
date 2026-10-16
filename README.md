@@ -1,112 +1,87 @@
+<div align="center">
+
 # allclear
 
-A status page and basic availability monitor built for Cloudflare's serverless
-platform.
+**为 Cloudflare serverless 平台打造的状态页与基础可用性监控**
 
-`allclear` gives you a public status page — component tree, incident timeline,
-90-day uptime history, subscriptions, i18n, dark mode — backed by **real
-measurement**. Scheduled probes record what actually happened, and uptime
-percentages are computed from those recorded impacts rather than asserted by
-hand.
+公开状态页 · 自动可用性探测 · 由真实数据计算的可用率
 
-It is a standalone project. It was built for one deployment first, but it is not
-specific to it: point the probes at your own endpoints and it reports on them.
+[![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+[![Deployed](https://img.shields.io/badge/deployed-no-lightgrey.svg)](#项目状态)
 
-**License: MIT.** All code and assets are original — see [Attribution](#attribution).
+[English](README.en.md) · [工程文档](docs/engineering.md) · [规格说明](docs/spec/)
+
+</div>
 
 ---
 
-## Status
+## 这是什么
 
-**M0–M5 are built and verified locally. Nothing is deployed.**
+`allclear` 提供一个公开状态页——组件树、事件时间线、90 天可用率历史、邮件订阅、
+中英双语、深色模式——并且背后是**真实测量**：定时探测器记录实际发生了什么，
+可用率百分比由这些记录计算得出，而不是手填上去的。
 
-| Milestone | Scope | State |
-| --- | --- | --- |
-| M0 | Deployment and technical-boundary validation on real Cloudflare infrastructure | Done — [`docs/spec/m0-findings.md`](docs/spec/m0-findings.md) |
-| M1 | Data model and the fault state machine | Done — [`docs/spec/state-machine.md`](docs/spec/state-machine.md) |
-| M2 | Admin API, admin console, snapshot pipeline | Done — [`docs/spec/admin-api.md`](docs/spec/admin-api.md), [`docs/spec/admin-ui.md`](docs/spec/admin-ui.md) |
-| M3 | Uptime maths and the probe scheduler | Done — [`docs/spec/uptime-math.md`](docs/spec/uptime-math.md), [`docs/spec/probe.md`](docs/spec/probe.md) |
-| M4 | Public status page | Done — [`docs/spec/visual-parity.md`](docs/spec/visual-parity.md) |
-| M5 | Subscriptions and unsubscribe | Done — [`docs/spec/subscriptions.md`](docs/spec/subscriptions.md) |
+它不依赖任何托管服务，整套东西跑在你自己的 Cloudflare 账号上：两个 Worker、
+一个 D1、一个 KV。探测目标由管理员配置并审核，指向你自己的端点。
 
-Current gate state, measured rather than assumed:
+![状态页截图](docs/images/status-page.png)
 
-```sh
-npm run typecheck   # exit 0
-npm test            # 294 passing (shared 82 / api 212)
-npm run build       # exit 0
-```
+> 上图由项目自带的 fixture 数据在本地渲染生成（`apps/web/verify/`）。项目**尚未部署**，
+> 所以这里没有线上实例的截图——fixture 数据本身是刻意做成「难看」的：一个新鲜探测、
+> 一个过期探测、一个完全没有探测的组件、一个进行中的事件，以及一个不该给组件上色的
+> 计划维护窗口。
 
-Read [Verification honesty](#verification-honesty) before treating any of that
-as a claim about production. It is not.
+## 核心特性
 
----
+### 公开状态页（`/status/:slug`）
 
-## What it does
+- **组件树**，按分区组织，每个组件的状态在读取时派生。
+- **事件与维护时间线**，条目可展开、可深链（`#change-<public_id>` 直接定位）。
+- **90 天可用率历史**，三种视图：条形、月历、表格。
+- **邮件订阅**，可按组件订阅、双重确认（double opt-in）、支持 RFC 8058 一键退订。
+- **中英双语、深色模式**，响应式下探到 375px。
+- **Atom feed**（`/status/:slug/feed.xml`）与机器可读的 `/status/:slug/snapshot.json`。
 
-**Public status page** (`/status/:slug`)
+### 自动可用性探测
 
-- Component tree grouped into sections, with a derived status per component.
-- Incident and maintenance timeline with expandable entries and deep links
-  (`#change-<public_id>` opens the matching entry).
-- 90-day uptime history with three views: a bar strip, a month calendar, and a
-  table.
-- Email subscriptions with per-component scoping, double opt-in, and RFC 8058
-  one-click unsubscribe.
-- zh-CN / en-US, dark mode, responsive down to 375px.
-- Atom feed at `/status/:slug/feed.xml` and a machine-readable
-  `/status/:slug/snapshot.json`.
+- 管理员配置的 HTTP 探测，按分钟调度。
+- **持久化的状态机**，带失败阈值与恢复阈值——单次请求失败不会开出公开事件。
+- 探测状态翻转时自动开关 `impact` 区间，并保留真实的观测时间戳。
 
-**Automatic availability probing**
+### 管理控制台（`/admin`）
 
-- Admin-configured HTTP probes on a per-minute scheduler.
-- A persisted state machine with failure and recovery thresholds, so a single
-  failed request does not open a public incident.
-- Probe transitions open and close `impact` intervals automatically, with the
-  real observation timestamps preserved.
+- 页面、分区、组件、探测目标、事件、手工影响，全部可管理。
+- **预算面板**：探测目标数量与每日发信量的余量。
+- **快照面板**：直接读*公开*端点，所以快照过期在控制台里就能发现。
 
-**Admin console** (`/admin`)
+### 可用率由数据算出
 
-- Page, section, component, probe target, change and manual-impact management
-  through Server Components and Server Actions.
-- A budget panel showing probe-target and daily-email headroom.
-- A snapshot panel that reads the *public* endpoint, so a stale snapshot is
-  discoverable from the console.
+探测状态翻转和手工录入的故障，都是 `impact` 区间的生产者。因此可用率永远是从
+实际记录里算出来的，不存在「手写一个 99.9%」这条路。
 
-**Uptime computed from recorded data**
+## 明确不做
 
-Both probe transitions and hand-entered impacts are producers of `impact`
-intervals, so the availability percentage is always derived from what was
-actually recorded — never typed in.
+为了不让范围漂移，以下都是刻意排除的：
 
----
+- on-call 排班与告警升级
+- 几百个第三方服务集成
+- 真实用户监控（RUM）
+- 基于 AI/LLM 的事件分析
+- 多租户 SaaS、计费、按客户分的账号体系
 
-## Explicit non-goals
+这是个状态页加一个基础监控。它不是完整的事件管理平台的替代品。
 
-Deliberately excluded, to keep the scope from drifting:
+## 架构
 
-- On-call schedules and alert escalation.
-- Hundreds of service integrations.
-- Real-user monitoring (RUM).
-- AI/LLM-based incident analysis.
-- Multi-tenant SaaS, billing, or per-customer accounts.
-
-This is a status page and a basic monitor. It is not a replacement for a
-full incident-management platform.
-
----
-
-## Architecture
-
-Two Workers plus a shared pure-function package.
+两个 Worker，加一个只放纯函数的共享包。
 
 ```
                     ┌─────────────────────────────┐
-   browser ────────▶│  allclear-web               │
+   浏览器 ─────────▶│  allclear-web               │
                     │  Next.js (vinext)           │
-                    │  • public status page       │
-                    │  • /admin console           │
-                    │  • Server Actions (writes)  │
+                    │  • 公开状态页               │
+                    │  • /admin 控制台            │
+                    │  • Server Actions（写）     │
                     └───────────┬─────────────────┘
                                 │  Service Binding
                                 │  + X-Internal-Key
@@ -114,352 +89,121 @@ Two Workers plus a shared pure-function package.
                     ┌─────────────────────────────┐
    cron ───────────▶│  allclear-api               │
                     │  Hono Worker                │
-                    │  • public read API          │
+                    │  • 公开读 API               │
                     │  • /internal/admin/*        │
-                    │  • probe scheduler          │
+                    │  • 探测调度                 │
                     └───────────┬─────────────────┘
                                 │
                     ┌───────────┴───────────┐
                     ▼                       ▼
-                 D1 (source of truth)    KV (published snapshots)
+                 D1（真相来源）          KV（已发布的快照）
 ```
 
-`allclear-api` is deployed with **no public route**. The web Worker reaches it
-over a Service Binding, and that reachability is *not* treated as
-authentication — every `/internal/*` route additionally requires a shared
-`INTERNAL_KEY`.
+`allclear-api` **不暴露公网路由**。web Worker 通过 Service Binding 访问它，
+而「能连上」不等于「有权限」——每个 `/internal/*` 路由还要额外校验共享的
+`INTERNAL_KEY`。
 
----
-
-## Design commitments
-
-These are load-bearing invariants, not aspirations. Each is enforced by code and
-pinned by tests.
-
-### Uptime is computed, never asserted
-
-```
-uptime = 1 − weighted_downtime / covered_duration
-```
-
-The numerator is a swept sum over non-overlapping time segments, taking the
-**most severe** active impact per segment. Overlapping incidents therefore
-cannot double-count, which a naive "sum of union per severity" gets wrong when
-different severities overlap.
-
-### Absence of evidence is not evidence of uptime
-
-A component with no probe coverage, or with probe data older than its freshness
-budget, reports `unknown` — never `operational`. Uncovered time is excluded from
-the denominator and reported separately as `unknown_duration`.
-
-### No silent 100%
-
-If the effective window is entirely excluded — for example fully covered by
-maintenance — uptime is `null` / N/A, not `100%`. A day nobody measured cannot
-render as a perfect day.
-
-### The snapshot carries evidence, not verdicts
-
-No component status is stored in the snapshot. Status depends on `now`: a
-maintenance window ending or an impact interval closing changes the correct
-answer **without any write occurring**, so a stored status goes stale in a way no
-version counter can detect. The snapshot carries the intervals and the latest
-probe result, and the reader derives the status at its own clock using the pure
-functions in `packages/shared`.
-
-### Probe timestamps are estimates, and stored as four separate fields
-
-`first_failed_at`, `detected_at`, `first_recovery_success_at` and `resolved_at`
-are distinct. The nominal detection lag is `(failure_threshold − 1) × interval`
-— not one interval. Probe-generated impacts are marked `estimated: true`, and the
-documentation states the error conditions rather than promising a bound.
-
-### The public read path does not require D1
-
-The snapshot is served from KV, falling back to the last known good document,
-and the read reports its own provenance (`source`) and whether it could confirm
-currency (`stale`) — separately from the document's age (`ageSeconds`, `aged`).
-
-### Probes are an admin-reviewed allowlist
-
-No user-submitted probe targets, and redirects are denied by default.
-
----
-
-## The read chain
-
-`readSnapshot` tries five sources in order and reports which one answered:
-
-| # | `source` | Reached when | `stale` |
-| --- | --- | --- | --- |
-| 1 | `kv-fresh` | The fresh key exists. Touches no D1. | `false` |
-| 2 | `d1-rebuild` | KV missed or failed to parse. Rebuilds from D1 and repopulates both KV keys and the colo-local copy. | `false` |
-| 3 | `kv-last` | D1 is also unavailable. Serves the last known good document. | `true` |
-| 4 | `cache` | KV could not answer at all. Serves the colo-local copy. | `true` |
-| 5 | `none` | Nothing to serve. The caller must render an explicit unavailable state. | `true` |
-
-Steps 3 and 4 cover **different failures** and neither substitutes for the other:
-`kv-last` covers D1 being unavailable (and is itself in KV), while `cache` covers
-KV being unavailable. The colo-local cache is not a consistency mechanism — it
-helps only the data centre that populated it — and it is documented as such.
-
-The consistency target is **about sixty seconds, as an optimisation target and
-not a guaranteed upper bound**. KV exposes no propagation deadline to enforce,
-and the code does not paper over the gap with a timestamp heuristic. Writes are
-published synchronously; the once-a-minute cron pass exists to *repair* a
-snapshot whose version has drifted, not to publish.
-
-**Storage is KV, not R2.** The payload is tens of kilobytes and read on every
-page view; R2's advantages are not exercised at that size, and dual-writing would
-add a second copy to keep in step for no benefit. The rationale is written out in
-[`docs/spec/snapshot.md`](docs/spec/snapshot.md).
-
----
-
-## Capacity boundaries (v1)
-
-Written into the code as constants rather than made configurable, because these
-are the numbers the deployment was *tested* at:
-
-| Boundary | Value | Enforced by |
-| --- | --- | --- |
-| Enabled probe targets | 20 | DB constraint, API validator, scheduler cap, console |
-| Minimum probe interval | 60 s | DB `CHECK`, API validator |
-| Enabled targets per component | 1 | Partial unique index |
-
-They live in one place — `packages/shared/src/limits.ts` — so the four layers
-cannot drift apart.
-
-The per-component limit exists so there is no hidden assumption about how
-multiple targets on one component would aggregate. Aggregate rules are deferred
-and documented rather than guessed at.
-
----
-
-## Security posture
-
-**Server-side requests (SSRF).** Any code that fetches a URL supplied as data
-allows only `http`/`https`, validates the host, and rejects loopback, private,
-link-local and reserved addresses. Redirects are denied by default (0 hops), with
-a 64 KB response body cap as defence in depth. A rejected URL is treated as
-*skipped*, not as an outage — the service behind it may be perfectly healthy, and
-opening a public incident over a typo in a config field would be a false positive
-on the most visible surface this project has.
-
-**The residual risk is stated, not hidden.** Host-string validation alone does
-not eliminate DNS rebinding. v1 therefore only probes an admin-reviewed allowlist
-of targets, and opening probe configuration to third parties would require a
-dedicated egress-security design first.
-
-**SQL.** All external input is passed as bound parameters. SQL is never built by
-concatenation, formatting, or interpolation.
-
-**Secrets.** Credentials come from environment variables or a secret store only.
-No usable credential literal appears in source, examples, tests or documentation.
-Local development secrets live in `.dev.vars`, which is gitignored. The test
-suite's fixture bindings are named `fixture-…-not-a-credential` precisely so they
-cannot be mistaken for real values.
-
-**Two credentials, on purpose.** `INTERNAL_KEY` says "this request comes from the
-web Worker" and is a property of the deployment. `ADMIN_TOKEN` says "a human who
-knows it is operating this console" and is a property of the request. Sharing one
-value would mean every operator knows the Worker's credential, and rotating it to
-revoke a person would break the site. The browser holds neither: it holds an
-`HttpOnly`, `SameSite=Lax`, `Path=/admin` HMAC session cookie.
-
-**Reachability is not authorisation.** A Server Action compiles to a public POST
-endpoint that attaches the Worker's own credential on the way out. The console's
-layout gate decides what *renders*; every write action re-checks the session
-independently, because rendering is not authorising.
-
-**Probe transitions are idempotent and atomic.** Each transition is modelled as a
-retryable business operation: a `db.batch()` commits the state update, change and
-impact together, actual affected-row counts are verified (a conditional `UPDATE`
-matching zero rows raises no error), and unique constraints backstop it. The test
-suite covers two concurrent cron runs on one target, a duplicate confirmation,
-and a failure after counters were updated.
-
----
-
-## Layout
-
-| Path | What it is |
-| --- | --- |
-| `apps/api` | Hono Worker — public read API, admin API, probe scheduler, subscriptions |
-| `apps/web` | Next.js status page and admin console, built with [vinext](https://github.com/cloudflare/vinext) |
-| `packages/shared` | Pure functions: status derivation, uptime maths, probe coverage, snapshot contract |
-| `docs/spec` | Specifications and verification records |
-| `apps/web/verify` | Fixture Workers used to render the UI locally without D1 or KV |
-
-### Stack
-
-Cloudflare Workers · D1 · KV · Service Bindings · Hono 4 · Next.js 16 (vinext) ·
-React 19 · Vite 8 · Tailwind CSS 4 · Radix UI · `next-intl` · `next-themes` ·
-lucide · Inter.
-
-This is **not** an npm workspaces monorepo — each package installs its own
-dependencies. The consequence worth knowing is that `packages/shared` must be
-built before anything importing it can run or type-check; both root scripts do
-that first.
-
----
-
-## Getting started
+## 快速开始
 
 ```sh
 git clone https://github.com/ZYongX09/AllClear
 cd AllClear
 
-# each package installs its own dependencies
+# 每个包各自安装依赖（这不是 npm workspaces 单仓）
 npm --prefix packages/shared install
 npm --prefix apps/api install
 npm --prefix apps/web install
 ```
 
-### Test and type-check
-
-```sh
-npm run typecheck   # builds packages/shared, then type-checks all three packages
-npm test            # packages/shared (pure Node), then apps/api (real workerd + D1)
-npm run build       # builds packages/shared, then apps/web
-```
-
-`apps/api` tests run against a **real `workerd` runtime with a real D1 binding**,
-not mocks — the design depends on specific SQLite behaviours (`db.batch()`
-rollback semantics, conditional `UPDATE` matching zero rows, partial unique
-indexes, `meta.changes`), and mocks would assert beliefs about those behaviours
-instead of the behaviours themselves.
-
-### Run the status page locally without Cloudflare resources
+**不接任何 Cloudflare 资源，先看一眼界面**：
 
 ```sh
 cd apps/web
 npx vite dev --config verify/vite.config.verify.ts --port 5219
 ```
 
-This serves the UI against fixture Workers (`apps/web/verify/`), so it renders
-with no D1, no KV and no migrations. The fixture data is deliberately awkward —
-a fresh probe, a stale probe, no probe at all, an open incident, a scheduled
-maintenance that must not paint its component.
+这条命令用 fixture Worker 提供数据，不需要 D1、KV 或迁移，打开
+<http://localhost:5219/status/fixture> 即可。首次编译较慢，属正常。
 
-### Database migrations
+**跑测试与类型检查**：
 
 ```sh
-cd apps/api
-npm run db:migrate:local     # apply migrations to the local D1
-npm run db:migrate:remote    # apply to the remote D1
+npm run typecheck   # 先构建 packages/shared，再检查三个包
+npm test            # 先 packages/shared（纯 Node），再 apps/api（真 workerd + 真 D1）
+npm run build       # 先构建 packages/shared，再构建 apps/web
 ```
 
-### Deploy
+`apps/api` 的测试跑在**真实的 `workerd` 与真实 D1 之上**，不是 mock——这套设计
+依赖若干具体的 SQLite 行为（`db.batch()` 的回滚语义、条件 `UPDATE` 匹配零行、
+偏唯一索引、`meta.changes`），用 mock 只会把「我以为它这样」当成「它确实这样」。
 
-Deployment is **manual** — there is no CI pipeline that publishes on push.
+**部署是手动的**，没有 CI 会在推送后自动发布：
 
 ```sh
 cd apps/api && npm run deploy
 cd apps/web && npm run deploy
 ```
 
-A successful `git push` is **not** evidence of a successful deployment. Verify by
-hitting the deployed Worker.
+`git push` 成功**不代表**部署成功，要打线上 Worker 验证。
 
-### Branches
+## 技术栈
 
-`develop` is the development branch; `main` is the release branch. Feature work
-lands on `develop`, and `develop` is merged into `main` only as a deliberate
-release step. See [`AGENTS.md`](AGENTS.md).
+Cloudflare Workers · D1 · KV · Service Bindings · Hono 4 · Next.js 16 (vinext) ·
+React 19 · Vite 8 · Tailwind CSS 4 · Radix UI · `next-intl` · `next-themes` ·
+lucide · Inter。
 
-`develop` is also the repository's **default branch**, because nothing has been
-released yet — `main` currently holds only the initial skeleton. Clone without
-`-b` and you get the branch that has the code in it.
+## 项目状态
 
----
+**M0–M5 已全部建成并在本地验证通过。目前没有部署任何东西。**
 
-## Verification honesty
+```sh
+npm run typecheck   # exit 0
+npm test            # 294 项通过（shared 82 / api 212）
+npm run build       # exit 0
+```
 
-This project keeps a hard line between **what has been observed** and **what is
-merely designed**. The same rule applies here.
+这些数字衡量的是**本地构建与测试**，不是生产。完整的「已验证 / 未验证」清单在
+[工程文档](docs/engineering.md#verification-honesty)，其中包含几条不该被忽略的缺口：
+管理端与状态页都还没有自动化测试，也没有做过人工的观感验收。此外，一次深度静态
+安全扫描的结论是 **inconclusive（不完整）**，因此**这个项目不能被称为已通过安全审计**。
 
-**Verified by running:**
+## 文档
 
-- `apps/api`: 212 tests across 10 files, against real `workerd` and real D1 —
-  including the state machine's concurrency and retry cases, the uptime
-  algorithm's overlap and zero-denominator cases, SSRF rejection, the read chain's
-  fallback ordering, and the colo-local cache layer.
-- `packages/shared`: 82 tests across 4 files, pure Node.
-- The status page's functional behaviour: component/section rendering, incident
-  expansion, deep links, the subscribe dialog, the calendar/chart toggle, i18n,
-  dark mode, and responsive breakpoints down to 375px — all driven in a browser
-  and recorded in [`docs/spec/visual-parity.md`](docs/spec/visual-parity.md).
-- The admin console's write guard: a rendered form was replayed with
-  `credentials: "omit"`, which is what an unauthenticated caller has. It was
-  refused, and nothing was created.
-- Build and type-check green, with `/admin` and `/status/:slug` present in the
-  build's route table.
-
-**Not verified, and not claimed:**
-
-- **Nothing is deployed.** No Worker is running, no remote migration has been
-  applied, and the production KV/D1 bindings have never been exercised by this
-  code.
-- **The admin console has no automated tests.** Its session verification, cookie
-  attributes and per-action guard are the security boundary for a public write
-  surface, and they were checked by hand once. This is the most important gap to
-  close.
-- **The status page has no automated tests either.** Its branches were driven in
-  a browser, not asserted in code.
-- **No human-perspective visual review has happened.** The design-language
-  comparison is a computed-style and geometry diff table; the rendered-PNG review
-  path could not run in the environment this was built in. The status page is
-  therefore **functionally verified and visually unverified**.
-- **The visual "dark mode" screenshot artefact is not trustworthy** — the file
-  named dark is actually a light render. Dark mode *behaviour* was verified by
-  operating the page's own toggle. See `visual-parity.md` §3.
-- **The cron repair pass has no dedicated test.** It was exercised incidentally
-  during M0 and never deliberately since.
-- **KV propagation delay is not simulated.** The D1-failure path is tested with a
-  database stand-in that throws; a real cross-colo delay is not reproduced.
-- **`GET /api/status/:slug/history` does not exist.** History is embedded in the
-  snapshot as `days` and served through `/snapshot.json`. The endpoint appears in
-  the original plan and was not built.
-- **A deep static security scan is inconclusive, not clean.** Its seven
-  candidates were each resolved by hand as non-findings, but the scan never
-  reached a complete conclusion, so this project must not be described as
-  security-audited. See [`docs/spec/security-scan.md`](docs/spec/security-scan.md).
-- **Migration `0002` is not idempotent** and has never been applied to a
-  production database.
-
----
-
-## Known single point of failure
-
-The status page and the prober both run on Cloudflare. **If Cloudflare itself is
-down, this system cannot report on it.** Detecting a full-platform outage requires
-a probe source outside Cloudflare; that is deliberately out of scope for now and
-is recorded as a risk rather than a solved problem.
-
----
-
-## Attribution
-
-Functionality was informed by studying mature commercial status-page products.
-**All code and assets here are original.** No third-party stylesheets, markup,
-copy, message catalogs, logos, or images were copied.
-
-Reusable dependencies are permissively licensed:
-
-| Dependency | License |
+| 文档 | 内容 |
 | --- | --- |
-| shadcn/ui patterns, Radix UI | MIT |
-| lucide icons | ISC |
-| Inter | OFL |
-| Tailwind CSS | MIT |
+| [docs/engineering.md](docs/engineering.md) | 架构、设计约束、读链、容量边界、安全姿态，以及验证边界 |
+| [docs/spec/state-machine.md](docs/spec/state-machine.md) | 故障状态机与数据模型 |
+| [docs/spec/probe.md](docs/spec/probe.md) | 探测器调度、SSRF 约束、保留策略 |
+| [docs/spec/uptime-math.md](docs/spec/uptime-math.md) | 可用率算法（区间扫描） |
+| [docs/spec/snapshot.md](docs/spec/snapshot.md) | 快照契约与一致性边界 |
+| [docs/spec/admin-api.md](docs/spec/admin-api.md) / [admin-ui.md](docs/spec/admin-ui.md) | 管理接口与控制台 |
+| [docs/spec/subscriptions.md](docs/spec/subscriptions.md) | 订阅、退订与发信配额 |
+| [docs/spec/visual-parity.md](docs/spec/visual-parity.md) | 视觉验收记录与已知缺口 |
+| [docs/spec/m0-findings.md](docs/spec/m0-findings.md) | M0 在真实 Cloudflare 上的实测结论 |
+| [AGENTS.md](AGENTS.md) | 本仓库的工作规则（分支、部署、密钥、许可） |
 
-[OpenStatus](https://github.com/openstatusHQ/openstatus) is **AGPL-3.0** and is
-not a source for this project's code.
+## 已知单点
 
----
+状态页和探测器都跑在 Cloudflare 上。**Cloudflare 自己挂了，这套系统就报不了它。**
+要探测全平台故障，需要一个 Cloudflare 之外的探测来源；这一项目前刻意不在范围内，
+被记为风险而不是已解决的问题。
 
-## License
+## 参与
 
-MIT — see [LICENSE](LICENSE).
+目前主要是一个个人项目。Issue 和 PR 都欢迎。
+
+`develop` 是开发分支，`main` 是发布分支，功能开发落在 `develop`，只有作为一次
+刻意的发布动作才会合并进 `main`。详细规则见 [AGENTS.md](AGENTS.md)。
+仓库默认分支是 `develop`——因为还没发布过，`main` 目前只有初始骨架。
+
+## 许可证
+
+**GNU General Public License v3.0**（SPDX：`GPL-3.0-only`），全文见 [LICENSE](LICENSE)。
+
+Copyright (C) 2026 ZhX589, ZYongX09
+
+功能上受到成熟商业状态页产品的启发，但**本仓库的代码与素材全部原创**，没有复制
+任何第三方的样式表、标记、文案、消息目录、logo 或图片。依赖项均为 GPL-3.0 兼容
+许可（MIT / ISC / OFL / Apache-2.0）。
+[OpenStatus](https://github.com/openstatusHQ/openstatus) 采用 **AGPL-3.0**，
+本项目未使用其任何代码。

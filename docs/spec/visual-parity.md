@@ -121,6 +121,7 @@ and not with `1`. Measured mean luminance of the three renders:
 | `allclear-desktop.png` (M4, light) | 248.7 |
 | `allclear-dark.png` (M4, labelled dark) | 248.7 |
 | `ac-desktop.png` (this session, light) | 248.6 |
+| `docs/images/status-page.png` (README screenshot, light) | 248.3 |
 
 The two M4 files are byte-different (174 926 vs 174 939 bytes, from
 anti-aliasing and the clock) but visually identical: **the file named dark is a
@@ -140,14 +141,63 @@ and the light one is the only render worth reviewing. Producing a dark PNG needs
 either an image-capable reviewer with a real browser session or a build-time
 `?theme=dark` hook, and neither exists.
 
+### A second trap: against the dev server, the render can come out unstyled
+
+Found while producing the README screenshot. The page's HTML carries
+
+```html
+<link rel="stylesheet" crossorigin="anonymous" href="/app/globals.css" …>
+```
+
+but under Vite **dev**, that URL does not return CSS. It returns a JavaScript
+module — the response body begins with
+`import { createHotContext … } from "/@vite/client"` and calls
+`__vite__updateStyle` — because dev-mode styles are injected at runtime by the
+client. The browser cannot parse it as a stylesheet, so the styles arrive only
+once the JS entry module runs and injects them.
+
+`firefox --screenshot` captures at the load event, which can precede that
+injection. The result is a render with the markup but **none of the CSS**: the
+container is not centred, the header does not split left/right, and the page
+collapses into a narrow left-hand column. It still looks like "a page", which is
+what makes it dangerous — nothing about the file says it is wrong.
+
+**How to tell, without an image-capable reviewer.** Measure the horizontal extent
+of ink per horizontal band, not the file as a whole:
+
+```python
+# every band of a correctly styled render spans the same centred column
+xs = [x for y in range(y0, y1) for x in range(w) if luminance(x, y) < 235]
+```
+
+On a correct render at 880px wide, every band spans **x 80..799** — a 719px
+column whose centre (439.5) is the viewport centre (440). On an unstyled render
+the ink stays in the left third.
+
+**Do not judge this from a downsampled thumbnail.** An ASCII or averaged preview
+of a styled page looks like a narrow left-hand column, because averaging a cell
+wipes out thin glyph strokes and keeps only the densest text. That misreading was
+made once here, from a correct render, and corrected by measuring instead.
+
+`docs/images/status-page.png` (the README screenshot) came from this path and was
+checked the measuring way: 880×1445, content continuous from row 16 to row 1420
+with no gap over 47px, all four sampled bands spanning x 80..799, and status hues
+present. It is a light render of a styled page. It has **not** been reviewed by
+eye — no image-capable reviewer exists in this environment (§3) — so treat it as
+geometrically verified and aesthetically unverified, exactly like every other
+render in this document.
+
 ## 4. Reproducing the measurements
 
 The dev server used for all of the above is the fixture one, not the real Worker:
 
 ```sh
 cd apps/web
-npx vite dev --config verify/vite.config.verify.ts --port 5180
+npx vite dev --config verify/vite.config.verify.ts --port 5219
 ```
+
+5219 is the current convention; the M4 measurements were taken on 5180, which is
+otherwise identical.
 
 `verify/api-stub.ts` stands in for `allclear-api` over the Service Binding, so the
 page renders with no D1, no KV and no migrations. Its clock is read per request;
@@ -157,10 +207,19 @@ silently stops exercising the `operational` branch.
 The PNG renders:
 
 ```sh
-xvfb-run -a --server-args="-screen 0 1400x2000x24" \
-  firefox --no-remote --profile /tmp/ffprof --window-size=1280,1800 \
-  --screenshot /tmp/ac-desktop.png "http://localhost:5180/status/fixture"
+xvfb-run -a --server-args="-screen 0 880x1600x24" \
+  firefox --no-remote --profile "$(mktemp -d)" --window-size=880,1600 \
+  --screenshot /tmp/ac-desktop.png "http://localhost:5219/status/fixture"
 ```
+
+Warm the page with a `curl` first — the first compile of `/status/fixture` takes
+tens of seconds, and a screenshot taken during it is a screenshot of nothing.
+
+**Check that the render is styled before using it.** Under the dev server the CSS
+arrives by JavaScript injection and a `--screenshot` capture can beat it, giving a
+page with no styling at all that still looks like a page. §3 explains the
+measurement that distinguishes the two. The symptom is content in a narrow
+left-hand column instead of a centred one.
 
 For the mobile render, use a narrower screen and window (`-screen 0 900x1900x24`,
 `--window-size=390,1500`) and a **separate profile directory**; reusing one

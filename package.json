@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "description": "Status page and basic availability monitor for Cloudflare's serverless platform",
-  "license": "MIT",
+  "license": "GPL-3.0-only",
   "type": "module",
   "scripts": {
     "build": "npm --prefix packages/shared run build && npm --prefix apps/web run build",

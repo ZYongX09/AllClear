@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "description": "allclear API Worker: public read API, internal admin API, probe scheduler",
-  "license": "MIT",
+  "license": "GPL-3.0-only",
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",

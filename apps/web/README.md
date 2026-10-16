@@ -1,11 +1,32 @@
-# vinext app
+# allclear-web
 
-This project was created with create-vinext-app.
+The Next.js (vinext) Worker: the public status page, the `/admin` console, and the
+Server Actions that write to the API Worker over a Service Binding.
+
+See the [repository README](../../README.md) for what the project is, and
+[docs/engineering.md](../../docs/engineering.md) for how it is put together.
 
 ## Scripts
 
-- `pnpm run dev` starts the vinext dev server.
-- `pnpm run build` builds the Cloudflare Worker output.
-- `pnpm run start` previews the built Worker locally.
-- `pnpm run deploy` deploys the Cloudflare Worker.
+- `npm run dev` — vinext dev server.
+- `npm run build` — build the Cloudflare Worker output.
+- `npm run start` — preview the built Worker locally.
+- `npm run deploy` — deploy the Cloudflare Worker (manual; see AGENTS.md).
+- `npm run typecheck` — generate Worker types, then `tsc --noEmit`.
 
+## Running the UI without Cloudflare resources
+
+The fixture Workers under `verify/` let the pages render with no D1, no KV and no
+migrations applied:
+
+```sh
+npx vite dev --config verify/vite.config.verify.ts --port 5219
+```
+
+This is a dev-only harness, not a second implementation of the API: it deliberately
+reproduces only the response shapes the UI depends on. `verify/admin-stub.ts`
+checks `X-Internal-Key` for *presence* only, which is enough to exercise the console's
+own session gate and is not a model of the API's authorisation.
+
+**Stop this server before running `npm run build`** — both write to the same
+`.vinext`/`.cloudflare` output directory and will corrupt each other.

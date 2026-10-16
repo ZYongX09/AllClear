@@ -58,6 +58,16 @@ concatenation, formatting, or string interpolation.
 
 ## Licensing hygiene
 
+**This project's own license is GPL-3.0-only** — see `LICENSE`. Two consequences
+for new work:
+
+- Dependencies must stay GPL-3.0-compatible. The current set (MIT / ISC / OFL /
+  Apache-2.0) all are. Adding a dependency under a GPL-incompatible or
+  proprietary license would make the project undistributable — check before
+  adding it, not after.
+- The `license` field in every `package.json` says `GPL-3.0-only`. Keep those in
+  step with `LICENSE`; a package that disagrees with the repository is a defect,
+  not a detail.
+
 This project is original work. Do not paste in third-party stylesheets, markup,
-copy, message catalogs, logos, or images. Dependencies must be permissively
-licensed (MIT / ISC / Apache-2.0 / OFL). Do not copy from AGPL projects.
+copy, message catalogs, logos, or images. Do not copy from AGPL projects.
