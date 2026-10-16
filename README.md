@@ -369,6 +369,10 @@ hitting the deployed Worker.
 lands on `develop`, and `develop` is merged into `main` only as a deliberate
 release step. See [`AGENTS.md`](AGENTS.md).
 
+`develop` is also the repository's **default branch**, because nothing has been
+released yet — `main` currently holds only the initial skeleton. Clone without
+`-b` and you get the branch that has the code in it.
+
 ---
 
 ## Verification honesty
