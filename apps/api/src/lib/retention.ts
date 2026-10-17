@@ -67,7 +67,11 @@ export async function applyRetention(
       const result = await db.batch([
         dailyUptimeStatement(db, [{ ...row, archived: true }], now),
         db.prepare(
-          `DELETE FROM probe_result WHERE id IN (
+          `DELETE FROM probe_result WHERE EXISTS (
+             SELECT 1 FROM daily_uptime d JOIN component c ON c.id=d.component_id
+              WHERE d.component_id=?1 AND d.day=?3 AND d.archived=1
+                AND d.rollup_revision=c.rollup_revision
+           ) AND id IN (
              SELECT r.id FROM probe_target t JOIN probe_result r
                ON r.probe_target_id = t.id AND r.observed_at < ?2
               WHERE t.component_id = ?1
@@ -81,8 +85,9 @@ export async function applyRetention(
                          WHERE enabled.component_id = ?1 AND enabled.enabled = 1), 60))
                    ORDER BY p.observed_at DESC, p.id DESC LIMIT 1)
            )`,
-        ).bind(candidate.component_id, dayEnd),
+        ).bind(candidate.component_id, dayEnd, day),
       ]);
+      if ((result[0]!.meta.changes ?? 0) === 0) throw new Error('evidence changed before archival commit; retry required');
       summary.rolledUp += 1;
       summary.deleted += result[1]!.meta.changes ?? 0;
     } catch (error) {

@@ -4,7 +4,8 @@
  * KV put: an expired worker may finish after a newer one. KV is an eventually
  * repaired fallback and can temporarily regress (including partial two-key puts).
  */
-import { utcDay, type Snapshot } from "@allclear/shared";
+import { startOfUtcDay, utcDay, type Snapshot } from "@allclear/shared";
+import { refreshHistoryFragment } from "./history-fragment";
 import { writeLiveSnapshotToCache, writeSnapshotToCache } from "./cache";
 import { buildSnapshotEvidence, writeSnapshot } from "./snapshot";
 
@@ -14,15 +15,19 @@ export const MAX_PUTS_PER_DAY = 800;
 export const PUBLISH_LEASE_SECONDS = 120;
 
 export async function refreshLiveSummary(db: D1Database, slug: string, now: number): Promise<Snapshot> {
+  await refreshHistoryFragment(db, slug, now);
   const { page, snapshot } = await buildSnapshotEvidence(db, slug, { now });
   const saved = await db.prepare(`INSERT INTO snapshot_summary
-    (page_id,content_revision,live_revision,urgent_revision,body,generated_at)
-    SELECT id,?2,?3,?4,?5,?6 FROM page
-    WHERE id=?1 AND snapshot_version=?2 AND live_revision=?3 AND urgent_revision=?4
+    (page_id,content_revision,live_revision,urgent_revision,body,generated_at,history_revision,history_valid_until)
+    SELECT id,?2,?3,?4,?5,?6,?7,?8 FROM page
+    WHERE id=?1 AND snapshot_version=?2 AND live_revision=?3 AND urgent_revision=?4 AND history_revision=?7
     ON CONFLICT(page_id) DO UPDATE SET content_revision=excluded.content_revision,
       live_revision=excluded.live_revision,urgent_revision=excluded.urgent_revision,
-      body=excluded.body,generated_at=excluded.generated_at`)
-    .bind(page.id, snapshot.snapshotVersion, page.live_revision, page.urgent_revision, JSON.stringify(snapshot), now).run();
+      body=excluded.body,generated_at=excluded.generated_at,history_revision=excluded.history_revision,
+      history_valid_until=excluded.history_valid_until
+    WHERE snapshot_summary.generated_at<=excluded.generated_at`)
+    .bind(page.id, snapshot.snapshotVersion, page.live_revision, page.urgent_revision, JSON.stringify(snapshot), now,
+      page.history_revision, startOfUtcDay(now) + 86_400).run();
   if (saved.meta.changes > 0) {
     await Promise.all([writeLiveSnapshotToCache(snapshot, now), writeSnapshotToCache(snapshot)]);
   }
@@ -45,7 +50,8 @@ export async function publishCheckpoint(db: D1Database, kv: KVNamespace, slug: s
     WHERE slug=?1 AND publish_lease_until<=?4 AND publish_retry_at<=?4
       AND (urgent_revision>published_urgent_revision OR snapshot_version>published_content_revision OR next_checkpoint_at<=?4)
       AND EXISTS (SELECT 1 FROM snapshot_summary s WHERE s.page_id=page.id
-        AND s.content_revision=page.snapshot_version AND s.live_revision=page.live_revision AND s.urgent_revision=page.urgent_revision)
+        AND s.content_revision=page.snapshot_version AND s.live_revision=page.live_revision AND s.urgent_revision=page.urgent_revision
+        AND s.history_revision=page.history_revision AND s.history_valid_until>?4)
     RETURNING id,(SELECT body FROM snapshot_summary WHERE page_id=page.id) AS body,
       (SELECT content_revision FROM snapshot_summary WHERE page_id=page.id) AS content_revision,
       (SELECT urgent_revision FROM snapshot_summary WHERE page_id=page.id) AS urgent_revision,
@@ -85,7 +91,8 @@ export async function publishCheckpoint(db: D1Database, kv: KVNamespace, slug: s
 /** D1 revision repair, not a per-minute KV read/version mismatch bypass. */
 export async function repairAndPublishSnapshots(db: D1Database, kv: KVNamespace, now: number, historyChanged = false): Promise<void> {
   const { results } = await db.prepare(`SELECT p.slug,
-      CASE WHEN s.page_id IS NULL OR s.live_revision<>p.live_revision OR s.content_revision<>p.snapshot_version OR s.urgent_revision<>p.urgent_revision THEN 1 ELSE 0 END AS dirty,
+      CASE WHEN s.page_id IS NULL OR s.live_revision<>p.live_revision OR s.content_revision<>p.snapshot_version OR s.urgent_revision<>p.urgent_revision
+        OR s.history_revision<>p.history_revision OR s.history_valid_until<=?1 THEN 1 ELSE 0 END AS dirty,
       CASE WHEN p.publish_retry_at<=?1 AND p.publish_lease_until<=?1 AND
         (p.urgent_revision>p.published_urgent_revision OR p.snapshot_version>p.published_content_revision OR p.next_checkpoint_at<=?1) THEN 1 ELSE 0 END AS due
     FROM page p LEFT JOIN snapshot_summary s ON s.page_id=p.id`).bind(now).all<{ slug: string; dirty: number; due: number }>();

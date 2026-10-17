@@ -69,6 +69,31 @@ A fallback is unconfirmed even if it was written recently. The status page warns
 about that provenance while still deriving component statuses from the actual
 evidence and reader clock. It never substitutes `generatedAt` for `lastProbeAt`.
 
+## Reusing history without rescanning it every minute
+
+The public document remains unchanged. Internally, `snapshot_history` stores a
+page's daily rows keyed by internal component identity and UTC day. Accepted
+minute observations dirty live evidence, not this history fragment.
+
+Daily-row mutations advance `page.history_revision` and upsert a sparse
+`snapshot_history_dirty` key in the same transaction. Background construction
+patches only those changed component-days, including deletion tombstones. A
+missing fragment performs one bounded initialization from daily rows; ordinary
+minute summary builds reuse the revision-matched fragment instead of scanning
+ninety days again.
+
+Fragment writes validate the captured history revision. The fragment save and
+acknowledgment of dirty keys commit together; newer invalidations cannot be
+cleared by an older fill. Component deletion or movement invalidates affected
+page fragments before cascading rows disappear. A UTC deadline expires the
+ninety-day horizon even without a mutation, and an older same-revision fill
+cannot replace a newer horizon.
+
+The coherent evidence query selects cached history or its read-only raw fallback
+alongside current live evidence. Materialized summaries and their hot-cache reads
+also validate the UTC horizon. These guards do not turn local Cache API entries
+or eventually consistent KV checkpoints into a global consistency mechanism.
+
 ## Writes, checkpoints and budgets
 
 Admin mutations update the D1 summary immediately server-side. Successful probe

@@ -12,7 +12,7 @@ npm run build     # builds packages/shared, then apps/web
 | Suite | Files | Tests | Runs against |
 |---|---|---|---|
 | `packages/shared` | 4 | 92 | plain Node |
-| `apps/api` | 13 | 246 | real `workerd` with a real D1 binding, including 3 capacity scenarios |
+| `apps/api` | 15 | 266 | real `workerd` with a real D1 binding, including 3 capacity scenarios |
 | `apps/web` | — | — | no suite yet; see below |
 
 ### `packages/shared` must be built before anything imports it
@@ -136,12 +136,23 @@ It also counts attempted KV reads and puts. Global fixtures reset pages,
 publication budgets, and every maintenance cursor between scenarios.
 
 The five-target, one-page, sixty-second healthy scenario executes 1,440 ticks
-with a preceding day of samples already present. Its measured result is 7,200
-new observations, 288 KV puts, zero KV gets, 2,405,044 D1 rows read, 62,962 rows
-written, and at most 34 SQL statements in one tick. The fault/recovery scenario
-peaks at 42 statements. With 223,200 retained samples seeded, the thirty-tick
-retention scenario reads 94,690 rows, writes 4,936, and purges 3,570 expired
-observations while preserving required anchors.
+with a preceding day of raw samples and ninety daily aggregates per component
+already present. Raw fixtures are imported before aggregates, with the resulting
+rollup revision stamped onto the seeded rows; import dirtiness is cleared before
+metering the quiet workload. This does not bypass invalidation in production.
+
+The measured result is 7,200 new observations, 288 KV puts, zero KV gets,
+393,543 D1 rows read, 66,616 rows written, and at most 38 SQL statements in one
+tick. The fault/recovery scenario peaks at 45 statements. With 223,200 retained
+samples seeded, the thirty-tick retention scenario reads 58,558 rows, writes
+5,028, and purges 3,570 expired observations while preserving required anchors.
+The materialized daily result is also checked against the exact full-day oracle
+at its actual computation time.
+
+Before incremental prefixes and sparse history reuse, the preceding version
+read 2,405,044 rows in its daily fixture. The new, more populated fixture reduces
+that measured read count by 83.6%; writes increase modestly for invalidation and
+history-cache bookkeeping. This is a read/write trade, not zero-cost monitoring.
 
 These are local regression workload measurements, not a production billing
 forecast or an account-wide Free-tier guarantee. Visitors, retries, more pages,

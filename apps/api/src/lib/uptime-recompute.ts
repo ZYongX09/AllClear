@@ -7,14 +7,11 @@
  * project derives from raw data at read time; this is the exception, so it is the
  * place where a stale value can hide.
  *
- * Two properties keep it honest:
- *
- *   * The recompute is *idempotent and total* for a day: it reads the impacts and
- *     probe results for that day and overwrites the row. There is no incremental
- *     accumulation, so a missed run is repaired by the next one rather than
- *     leaving a permanently wrong number.
- *   * Every transition recomputes the affected component's recent days
- *     immediately, so "today" is never a day behind.
+ * The full-day oracle remains available for transitions, finalization and
+ * archival. Routine refreshes append an exact, revision-tagged prefix ending at
+ * an actual observation, then freshly evaluate the uncommitted tail. Meaningful
+ * evidence edits invalidate prefixes transactionally and queue bounded repairs.
+ * The prefix and published daily totals commit in the same guarded UPSERT.
  */
 
 import {
@@ -27,6 +24,9 @@ import {
   type Status,
   type UptimeImpact,
   type UptimeMaintenance,
+  type UptimeResult,
+  FAULT_RANK,
+  clamp01,
 } from "@allclear/shared";
 
 /** How many days back a transition triggers an immediate recompute. */
@@ -35,6 +35,27 @@ export const TRANSITION_RECOMPUTE_DAYS = 2;
 interface ComponentRow {
   id: number;
   available_since: number;
+  rollup_revision: number;
+}
+
+/** Only a proven prefix is accumulated; the unbracketed tail is never committed. */
+export interface UptimePrefix {
+  at: number;
+  covered: number;
+  unknown: number;
+  excluded: number;
+  weighted: number;
+  degraded: number;
+  partial: number;
+  full: number;
+}
+
+interface CheckpointRow {
+  component_id: number;
+  day: string;
+  rollup_revision: number;
+  computed_at: number;
+  prefix_state: string | null;
 }
 
 interface ImpactRow {
@@ -67,6 +88,9 @@ export interface DailyUptimeRow {
   worstStatus: Status;
   /** Finalized immediately before raw evidence is purged. */
   archived?: boolean;
+  /** Evidence revision captured before the reads; persistence rejects stale work. */
+  rollupRevision?: number;
+  prefix?: UptimePrefix | null;
 }
 
 const DAY_SECONDS = 86_400;
@@ -99,9 +123,24 @@ export async function computeDailyUptimeBatch(
   now: number,
   days: string[] = [utcDay(now)],
 ): Promise<DailyUptimeRow[]> {
+  return computeBatch(db, requests, now, days, false);
+}
+
+/** Same maths/oracle, but read only the evidence after a valid prefix checkpoint. */
+export async function computeIncrementalDailyUptimeBatch(
+  db: D1Database, requests: DailyUptimeRequest[] | null, now: number,
+  days: string[] = [utcDay(now)],
+): Promise<DailyUptimeRow[]> {
+  return computeBatch(db, requests, now, days, true);
+}
+
+async function computeBatch(
+  db: D1Database, requests: DailyUptimeRequest[] | null, now: number,
+  days: string[], incremental: boolean,
+): Promise<DailyUptimeRow[]> {
   if (requests?.length === 0) return [];
   const { results: components } = await db.prepare(
-    `SELECT c.id, c.available_since,
+    `SELECT c.id, c.available_since, c.rollup_revision,
             MAX(60, COALESCE(MAX(t.interval_seconds), 60)) AS interval_seconds,
             (SELECT MAX(day) FROM daily_uptime d
               WHERE d.component_id = c.id AND d.archived = 1) AS archived_through
@@ -117,12 +156,31 @@ export async function computeDailyUptimeBatch(
       const component = components.find((c) => c.id === r.componentId);
       return component && (component.archived_through === null || r.day > component.archived_through);
     });
+  const checkpoints = incremental && wanted.length > 0
+    ? (await db.prepare(`SELECT d.component_id, d.day, d.rollup_revision,
+           d.computed_at, d.prefix_state
+         FROM json_each(?1) w JOIN daily_uptime d
+           ON d.component_id=json_extract(w.value,'$.componentId')
+          AND d.day=json_extract(w.value,'$.day') WHERE d.archived=0`)
+      .bind(JSON.stringify(wanted)).all<CheckpointRow>()).results : [];
+  const prefixFor = (componentId: number, day: string): UptimePrefix | null => {
+    const component = components.find((c) => c.id === componentId);
+    const checkpoint = checkpoints.find((c) => c.component_id === componentId && c.day === day);
+    if (!component || !checkpoint || checkpoint.rollup_revision !== component.rollup_revision
+      || checkpoint.computed_at > now || checkpoint.prefix_state === null) return null;
+    const prefix = JSON.parse(checkpoint.prefix_state) as UptimePrefix;
+    const start = Date.parse(`${day}T00:00:00Z`) / 1000;
+    return prefix.at >= start && prefix.at <= Math.min(start + DAY_SECONDS, now) ? prefix : null;
+  };
   const spans = components.flatMap((component) => {
-    const starts = wanted.filter((r) => r.componentId === component.id)
-      .map((r) => Date.parse(`${r.day}T00:00:00Z`) / 1000).filter(Number.isFinite);
+    const componentRequests = wanted.filter((r) => r.componentId === component.id);
+    const starts = componentRequests.map((r) => Date.parse(`${r.day}T00:00:00Z`) / 1000)
+      .filter(Number.isFinite);
     if (starts.length === 0) return [];
+    const from = Math.min(...componentRequests.map((r) =>
+      prefixFor(r.componentId, r.day)?.at ?? Date.parse(`${r.day}T00:00:00Z`) / 1000));
     const gapMax = defaultCoverageGapMax(component.interval_seconds);
-    return [{ componentId: component.id, from: Math.min(...starts),
+    return [{ componentId: component.id, from,
       to: Math.max(...starts) + DAY_SECONDS, gapMax }];
   });
   if (spans.length === 0) return [];
@@ -167,14 +225,15 @@ export async function computeDailyUptimeBatch(
     const resultRows = (results.results as unknown as (ProbeResultRow & { component_id: number })[])
       .filter((r) => r.component_id === componentId && r.observed_at >= dayStart - gapMax
         && r.observed_at <= Math.min(dayStart + DAY_SECONDS + gapMax, now));
-    return [calculateDailyUptime(componentId, day, dayStart, component, impactRows, maintenanceRows, resultRows, gapMax, now)];
+    return [calculateDailyUptime(componentId, day, dayStart, component, impactRows,
+      maintenanceRows, resultRows, gapMax, now, incremental ? prefixFor(componentId, day) : undefined)];
   });
 }
 
 function calculateDailyUptime(
   componentId: number, day: string, dayStart: number, component: ComponentRow,
   impactRows: ImpactRow[], maintenanceRows: MaintenanceRow[], resultRows: ProbeResultRow[],
-  gapMax: number, now: number,
+  gapMax: number, now: number, previousPrefix?: UptimePrefix | null,
 ): DailyUptimeRow {
   const dayEnd = dayStart + DAY_SECONDS;
   const uptimeImpacts: UptimeImpact[] = [];
@@ -207,25 +266,58 @@ function calculateDailyUptime(
     gapMax,
   );
 
-  const computed = computeUptime({
-    windowStart: dayStart,
-    windowEnd: dayEnd,
-    availableSince: component.available_since,
-    now,
-    impacts: uptimeImpacts,
-    maintenances: uptimeMaintenances,
-    coverage,
+  const evaluate = (start: number, end: number) => computeUptime({
+    windowStart: start, windowEnd: end, availableSince: component.available_since,
+    now, impacts: uptimeImpacts, maintenances: uptimeMaintenances, coverage,
   });
+  if (previousPrefix === undefined) {
+    const computed = evaluate(dayStart, dayEnd);
+    return { componentId, day, coveredSeconds: computed.coveredSeconds,
+      unknownSeconds: computed.unknownSeconds, downtimeWeighted: computed.weightedDowntimeSeconds,
+      uptime: computed.uptime, worstStatus: computed.worstStatus,
+      rollupRevision: component.rollup_revision, prefix: null };
+  }
+  const prefix = previousPrefix ?? emptyPrefix(dayStart);
+  // Never seal the absence of a successor: a later sample may bracket that tail.
+  // A post-midnight successor may seal through dayEnd, but must already exist.
+  const last = resultRows.reduce((at, row) => Math.max(at, Math.min(dayEnd, row.observed_at)), prefix.at);
+  const nextAt = Math.max(prefix.at, Math.min(last, dayEnd, now));
+  const next = addResult(prefix, evaluate(prefix.at, nextAt), nextAt);
+  const total = addResult(next, evaluate(nextAt, dayEnd), nextAt);
+  return { componentId, day, coveredSeconds: total.covered, unknownSeconds: total.unknown,
+    downtimeWeighted: total.weighted,
+    uptime: total.covered > 0 ? clamp01(1 - total.weighted / total.covered) : null,
+    worstStatus: prefixStatus(total), rollupRevision: component.rollup_revision, prefix: next };
+}
 
-  return {
-    componentId,
-    day,
-    coveredSeconds: computed.coveredSeconds,
-    unknownSeconds: computed.unknownSeconds,
-    downtimeWeighted: computed.weightedDowntimeSeconds,
-    uptime: computed.uptime,
-    worstStatus: computed.worstStatus,
-  };
+function emptyPrefix(at: number): UptimePrefix {
+  return { at, covered: 0, unknown: 0, excluded: 0, weighted: 0, degraded: 0, partial: 0, full: 0 };
+}
+
+function addResult(prefix: UptimePrefix, result: UptimeResult, at: number): UptimePrefix {
+  const next = { ...prefix, at, covered: prefix.covered + result.coveredSeconds,
+    unknown: prefix.unknown + result.unknownSeconds, excluded: prefix.excluded + result.excludedSeconds,
+    weighted: prefix.weighted + result.weightedDowntimeSeconds };
+  for (const segment of result.segments) {
+    if (segment.counted !== 'covered' || segment.weight <= 0) continue;
+    const duration = segment.end - segment.start;
+    if (segment.severity === 'degraded_performance') next.degraded += duration;
+    if (segment.severity === 'partial_outage') next.partial += duration;
+    if (segment.severity === 'full_outage') next.full += duration;
+  }
+  return next;
+}
+
+function prefixStatus(total: UptimePrefix): Status {
+  const severities = [
+    ...(total.degraded > 0 ? ['degraded_performance' as const] : []),
+    ...(total.partial > 0 ? ['partial_outage' as const] : []),
+    ...(total.full > 0 ? ['full_outage' as const] : []),
+  ];
+  if (severities.length > 0) return severities.reduce((a, b) => FAULT_RANK[a] > FAULT_RANK[b] ? a : b);
+  if (total.covered === 0) return total.excluded > 0 ? 'maintenance' : 'unknown';
+  if (total.unknown > total.covered) return 'unknown';
+  return total.excluded > 0 ? 'maintenance' : 'operational';
 }
 
 /** Write one day's row. Idempotent: the row is replaced, never accumulated. */
@@ -244,19 +336,28 @@ export function dailyUptimeStatement(
   return db.prepare(
     `INSERT INTO daily_uptime
        (component_id, day, covered_seconds, unknown_seconds, downtime_weighted,
-        uptime, worst_status, computed_at, archived)
+        uptime, worst_status, computed_at, archived, rollup_revision, prefix_state)
      SELECT json_extract(value, '$.componentId'), json_extract(value, '$.day'),
             json_extract(value, '$.coveredSeconds'), json_extract(value, '$.unknownSeconds'),
             json_extract(value, '$.downtimeWeighted'), json_extract(value, '$.uptime'),
-            json_extract(value, '$.worstStatus'), ?2, COALESCE(json_extract(value, '$.archived'), 0)
-       FROM json_each(?1) WHERE 1
+            json_extract(value, '$.worstStatus'), ?2, COALESCE(json_extract(value, '$.archived'), 0),
+            COALESCE(json_extract(value, '$.rollupRevision'), c.rollup_revision),
+            json_extract(value, '$.prefix')
+       FROM json_each(?1) JOIN component c ON c.id=json_extract(value,'$.componentId')
+      WHERE json_extract(value,'$.rollupRevision') IS NULL
+         OR c.rollup_revision=json_extract(value,'$.rollupRevision')
      ON CONFLICT(component_id, day) DO UPDATE SET
        covered_seconds = excluded.covered_seconds,
        unknown_seconds = excluded.unknown_seconds,
        downtime_weighted = excluded.downtime_weighted,
        uptime = excluded.uptime, worst_status = excluded.worst_status,
-       computed_at = excluded.computed_at, archived = excluded.archived
-     WHERE daily_uptime.archived = 0`,
+       computed_at = excluded.computed_at, archived = excluded.archived,
+       rollup_revision = excluded.rollup_revision, prefix_state = excluded.prefix_state
+     WHERE daily_uptime.archived = 0
+       AND (daily_uptime.rollup_revision <> excluded.rollup_revision
+         OR (daily_uptime.computed_at <= excluded.computed_at
+           AND (excluded.prefix_state IS NULL OR daily_uptime.prefix_state IS NULL
+             OR json_extract(excluded.prefix_state,'$.at') >= json_extract(daily_uptime.prefix_state,'$.at'))))`,
   ).bind(JSON.stringify(rows), now);
 }
 

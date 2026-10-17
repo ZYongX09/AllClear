@@ -216,11 +216,24 @@ when no component contributed measurable time.
 `probe_result` on every page view would be thousands of rows per request. The
 materialized live summary embeds those daily rows without recomputing them.
 
-The recompute is idempotent and total for a day: it reads impacts and probe
-results, then overwrites the row. Recent history normally recomputes every 300
-seconds, independently of live summary updates. `historyComputedAt` records that
-work in epoch seconds; assembling a summary must not advance it or claim every
-historical day was refreshed.
+The exact full-day recompute remains the repair and validation oracle. Routine
+history work runs every 300 seconds using an incremental prefix: additive covered,
+unknown, excluded, weighted-downtime and counted fault-severity totals are stored
+on the daily row. Only the interval through an actual observed boundary is
+checkpointed. The remaining tail is evaluated afresh, so a stopped probe never
+receives invented coverage and later qualifying observations can still bracket
+previously unknown time.
+
+The daily public result and its prefix commit in one revision-guarded upsert.
+Within a revision, delayed shorter prefixes cannot overwrite longer ones;
+meaningful event or configuration changes invalidate the prefix and use the exact
+oracle instead. Status derives from the combined counters and counted severities,
+not the maximum of prefix/tail status labels or an average of their percentages.
+
+`historyComputedAt` records actual computation work in epoch seconds; assembling
+a live summary must not advance it or claim every historical day was refreshed.
+Current-state summaries reuse a revision-matched cached history fragment, with
+sparse component/day invalidation rather than rereading ninety days per minute.
 
 The recompute reads coverage from one `gapMax` before the day through one
 `gapMax` after it, bounded by `now`. Actual observations on both sides of midnight
@@ -230,6 +243,22 @@ today and yesterday together. A persisted finalization cursor processes closed
 days after a probe-interval-dependent grace period and catches up one day per
 tick after missed runs. Current status still derives from live evidence; history
 can legitimately lag and its computation time is displayed separately.
+
+### Historical edits and late evidence
+
+Impact interval/severity edits, maintenance membership or window changes, probe
+configuration, and component lifetime changes advance a separate rollup revision.
+Ordinary accepted append-only observations do not invalidate an existing prefix.
+Direct raw imports and component-wide out-of-order evidence are exceptional and
+must invalidate concurrent computations, including a predecessor day's midnight
+coverage dependency.
+
+Today and confirmed probe transitions retain priority. Persisted historical
+repair processes retained, unarchived component-days in bounded steps, including
+missing days reached by a backdated edit; a restart does not discard the cursor.
+A newer mutation revision prevents an older worker from advancing or clearing its
+repair state. This is eventual historical repair, not a promise that an edit
+recalculates every affected date in the request that saved it.
 
 ## Retention interaction: roll up before deleting
 

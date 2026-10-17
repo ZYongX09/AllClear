@@ -26,13 +26,14 @@ import {
 
 import { readSnapshotFromCache, writeSnapshotToCache, readLiveSnapshotFromCache, writeLiveSnapshotToCache } from "./cache";
 
+import { CACHED_HISTORY_SQL, RAW_HISTORY_SQL, HISTORY_DAYS } from "./history-fragment";
+
+export { HISTORY_DAYS } from "./history-fragment";
 export { freshKey, lastKey } from "@allclear/shared";
 export type { ReadResult, Snapshot } from "@allclear/shared";
 
 /** How much change history the snapshot carries, in seconds. */
 export const CHANGE_HISTORY_SECONDS = 30 * 86_400;
-/** How many daily history rows per component the snapshot carries. */
-export const HISTORY_DAYS = 90;
 /** Upper bound on changes embedded in one snapshot. */
 export const MAX_CHANGES = 50;
 
@@ -44,6 +45,7 @@ interface PageRow {
   updated_at: number;
   live_revision: number;
   urgent_revision: number;
+  history_revision: number;
 }
 
 interface SectionRow {
@@ -155,7 +157,7 @@ export async function buildSnapshotEvidence(
   // A single SQLite statement is a consistent read, including the revision
   // stamped on the document. Each subquery is constrained to this page.
   const data = await db.prepare(`SELECT
-    (SELECT json_group_array(json_object('id',id,'slug',slug,'name',name,'snapshot_version',snapshot_version,'updated_at',updated_at,'live_revision',live_revision,'urgent_revision',urgent_revision)) FROM (SELECT id,slug,name,snapshot_version,updated_at,live_revision,urgent_revision FROM page WHERE slug=?1)) AS page,
+    (SELECT json_group_array(json_object('id',id,'slug',slug,'name',name,'snapshot_version',snapshot_version,'updated_at',updated_at,'live_revision',live_revision,'urgent_revision',urgent_revision,'history_revision',history_revision)) FROM (SELECT id,slug,name,snapshot_version,updated_at,live_revision,urgent_revision,history_revision FROM page WHERE slug=?1)) AS page,
     (SELECT json_group_array(json_object('id',id,'public_id',public_id,'name',name,'description',description,'order_id',order_id)) FROM (SELECT id,public_id,name,description,order_id FROM section WHERE page_id=(SELECT id FROM page WHERE slug=?1) ORDER BY order_id,id)) AS sections,
     (SELECT json_group_array(json_object('id',id,'public_id',public_id,'name',name,'description',description,'section_id',section_id,'order_id',order_id,'available_since',available_since)) FROM (SELECT id,public_id,name,description,section_id,order_id,available_since FROM component WHERE page_id=(SELECT id FROM page WHERE slug=?1) ORDER BY order_id,id)) AS components,
     (SELECT json_group_array(json_object('target_public_id',target_public_id,'component_id',component_id,'interval_seconds',interval_seconds,'last_probe_at',last_probe_at,'last_ok',last_ok)) FROM (SELECT t.public_id AS target_public_id,t.component_id,t.interval_seconds,s.last_probe_at,(SELECT r.ok FROM probe_result r WHERE r.public_id=s.last_result_id) AS last_ok FROM probe_target t JOIN component c ON c.id=t.component_id LEFT JOIN probe_state s ON s.probe_target_id=t.id WHERE c.page_id=(SELECT id FROM page WHERE slug=?1) AND t.enabled=1)) AS probes,
@@ -164,7 +166,7 @@ export async function buildSnapshotEvidence(
     (SELECT json_group_array(json_object('change_id',change_id,'component_id',component_id)) FROM (SELECT cc.change_id,cc.component_id FROM change_component cc JOIN change ch ON ch.id=cc.change_id WHERE ch.page_id=(SELECT id FROM page WHERE slug=?1))) AS changeComponents,
     (SELECT json_group_array(json_object('id',id,'public_id',public_id,'change_id',change_id,'status',status,'body',body,'created_at',created_at)) FROM (SELECT u.id,u.public_id,u.change_id,u.status,u.body,u.created_at FROM change_update u JOIN change ch ON ch.id=u.change_id WHERE ch.page_id=(SELECT id FROM page WHERE slug=?1) ORDER BY u.created_at,u.id)) AS updates,
     (SELECT json_group_array(json_object('change_update_id',change_update_id,'component_id',component_id)) FROM (SELECT uc.change_update_id,uc.component_id FROM change_update_component uc JOIN change_update u ON u.id=uc.change_update_id JOIN change ch ON ch.id=u.change_id WHERE ch.page_id=(SELECT id FROM page WHERE slug=?1))) AS updateComponents,
-    (SELECT json_group_array(json_object('component_id',component_id,'day',day,'uptime',uptime,'worst_status',worst_status,'covered_seconds',covered_seconds,'unknown_seconds',unknown_seconds,'computed_at',computed_at)) FROM (SELECT u.component_id,u.day,u.uptime,u.worst_status,u.covered_seconds,u.unknown_seconds,u.computed_at FROM daily_uptime u JOIN component c ON c.id=u.component_id WHERE c.page_id=(SELECT id FROM page WHERE slug=?1) AND u.day>=?3 ORDER BY u.day)) AS daily`)
+    COALESCE(${CACHED_HISTORY_SQL}, ${RAW_HISTORY_SQL}) AS daily`)
     .bind(slug, now, historyFloor, changeFloor, MAX_CHANGES)
     .first<Record<string, string>>();
   if (!data) throw new Error(`no page with slug ${slug}`);
@@ -442,10 +444,10 @@ export async function readSnapshot(
   // A hot live key is independent from the hour-long failure hedge. Cache age
   // never changes probe timestamps; readers still derive strict freshness.
   const hot = await readLiveSnapshotFromCache(slug, now);
-  if (hot) return finish(hot, "cache-live", false);
+  if (hot && utcDay(hot.generatedAt) === utcDay(now)) return finish(hot, "cache-live", false);
   try {
-    const row = await db.prepare("SELECT s.body FROM snapshot_summary s JOIN page p ON p.id=s.page_id WHERE p.slug=?1 AND s.content_revision=p.snapshot_version AND s.live_revision=p.live_revision AND s.urgent_revision=p.urgent_revision")
-      .bind(slug).first<{ body: string }>();
+    const row = await db.prepare("SELECT s.body FROM snapshot_summary s JOIN page p ON p.id=s.page_id WHERE p.slug=?1 AND s.content_revision=p.snapshot_version AND s.live_revision=p.live_revision AND s.urgent_revision=p.urgent_revision AND s.history_revision=p.history_revision AND s.history_valid_until>?2")
+      .bind(slug, now).first<{ body: string }>();
     if (row) {
       const live: unknown = JSON.parse(row.body);
       if (!isSnapshot(live)) throw new Error("invalid live summary document");

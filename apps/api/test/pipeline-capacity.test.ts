@@ -3,6 +3,7 @@ import { createExecutionContext, createScheduledController } from "cloudflare:te
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import worker from "../src/index";
+import { computeDailyUptime } from "../src/lib/uptime-recompute";
 import { testEnv as env } from "./env";
 import { createComponent, createPage, createProbeTarget, DAY, workerEnv } from "./helpers";
 
@@ -102,12 +103,12 @@ beforeEach(async () => {
 afterEach(() => vi.restoreAllMocks());
 
 describe("pipeline capacity", () => {
-  it("preserves minute sampling within a measured one-page daily storage budget", async () => {
+  it("preserves minute sampling and ninety-day history within a measured one-page daily storage budget", async () => {
     const start = Math.floor(Date.parse("2026-01-12T00:05:20Z") / 1000);
     const page = await createPage("Capacity acceptance");
     const targetIds: number[] = [];
     for (let index = 0; index < 5; index += 1) {
-      const component = await createComponent(page.id, { availableSince: start - 2 * DAY });
+      const component = await createComponent(page.id, { availableSince: start - 100 * DAY });
       const target = await createProbeTarget(component.id);
       targetIds.push(target.id);
       await env.DB.prepare(
@@ -119,6 +120,20 @@ describe("pipeline capacity", () => {
          SELECT ?1 || '-' || n, ?2, ?3 - n * 60, 1, 200, 1, NULL, ?3 - n * 60
            FROM samples`,
       ).bind(`capacity-${target.id}`, target.id, start).run();
+      await env.DB.prepare("UPDATE component SET rollup_dirty=0,rollup_dirty_from=NULL WHERE id=?1")
+        .bind(component.id).run();
+      await env.DB.prepare(
+        `INSERT INTO daily_uptime
+           (component_id, day, covered_seconds, unknown_seconds, downtime_weighted,
+            uptime, worst_status, computed_at, archived, rollup_revision)
+         WITH RECURSIVE days(n) AS (
+           SELECT 1 UNION ALL SELECT n + 1 FROM days WHERE n < 90
+         )
+         SELECT c.id, date(?2 - n * 86400, 'unixepoch'), 86400, 0, 0,
+                1, 'operational', ?2 - n * 86400, CASE WHEN n > 30 THEN 1 ELSE 0 END,
+                c.rollup_revision
+           FROM days CROSS JOIN component c WHERE c.id=?1`,
+      ).bind(component.id, start).run();
     }
 
     let now = start;
@@ -155,11 +170,32 @@ describe("pipeline capacity", () => {
     expect(counts.results).toHaveLength(5);
     expect(counts.results.every((row) => targetIds.includes(row.probe_target_id) && row.n === 1440)).toBe(true);
     expect(counts.results.every((row) => row.last_at === now)).toBe(true);
+    const materialized = await env.DB.prepare(
+      `SELECT d.component_id,d.day,d.covered_seconds,d.unknown_seconds,d.downtime_weighted,
+              d.uptime,d.worst_status,d.computed_at
+         FROM daily_uptime d JOIN component c ON c.id=d.component_id
+        WHERE c.page_id=?1 AND d.day=date(?2,'unixepoch')`,
+    ).bind(page.id, now).all<{
+      component_id: number; day: string; covered_seconds: number; unknown_seconds: number;
+      downtime_weighted: number; uptime: number | null; worst_status: string; computed_at: number;
+    }>();
+    expect(materialized.results).toHaveLength(5);
+    for (const row of materialized.results) {
+      const exact = await computeDailyUptime(env.DB, row.component_id, row.day, row.computed_at);
+      expect(exact).not.toBeNull();
+      expect(row.covered_seconds).toBe(exact!.coveredSeconds);
+      expect(row.unknown_seconds).toBe(exact!.unknownSeconds);
+      expect(row.downtime_weighted).toBeCloseTo(exact!.downtimeWeighted, 10);
+      expect(row.uptime).toBe(exact!.uptime);
+      expect(row.worst_status).toBe(exact!.worstStatus);
+    }
     expect(counters.errors).toEqual([]);
     expect(counters.puts).toBeLessThanOrEqual(292);
     expect(counters.gets).toBe(0);
-    expect(counters.rowsRead).toBeLessThan(3_000_000);
+    expect(counters.rowsRead).toBeLessThan(500_000);
     expect(counters.rowsWritten).toBeLessThan(80_000);
+    const historyQuery = Object.entries(counters.queries).find(([sql]) => sql.includes("FROM daily_uptime d JOIN component c ON c.id=d.component_id"));
+    if (historyQuery) expect(historyQuery[1].rowsRead).toBeLessThan(15_000);
     expect(Math.max(...perTick)).toBeLessThanOrEqual(50);
     log.mockRestore();
     console.log("pipeline capacity evidence", {
@@ -240,6 +276,8 @@ describe("pipeline capacity", () => {
          SELECT ?1 || '-' || n, ?2, ?3 - n * 60, 1, 200, 1, NULL, ?3 - n * 60
            FROM samples`,
       ).bind(`retained-${target.id}`, target.id, start).run();
+      await env.DB.prepare("UPDATE component SET rollup_dirty=0,rollup_dirty_from=NULL WHERE id=?1")
+        .bind(component.id).run();
     }
     let now = start;
     vi.spyOn(Date, "now").mockImplementation(() => now * 1000);

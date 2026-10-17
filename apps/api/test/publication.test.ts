@@ -92,7 +92,7 @@ describe("live summary and checkpoint publication", () => {
       })).kind).toBe("applied");
       expect(statements).toHaveLength(3);
       expect(statements[0]!.rowsRead).toBeLessThanOrEqual(1);
-      expect(statements[1]!.rowsRead).toBeLessThanOrEqual(20);
+      expect(statements[1]!.rowsRead).toBeLessThanOrEqual(24);
       expect(statements[2]!.rowsRead).toBeLessThanOrEqual(2);
       evidence.push({ history, predecessors, statements });
     }
@@ -224,6 +224,8 @@ describe("live summary and checkpoint publication", () => {
     await env.DB.prepare("INSERT INTO snapshot_publish_budget(day,puts,periodic_puts) VALUES (?1,800,288)").bind(new Date(T0 * 1000).toISOString().slice(0, 10)).run();
     expect((await publishCheckpoint(env.DB, store.kv, f.page.slug, T0)).error).toContain("budget");
     expect(store.puts()).toBe(0);
+    // A new UTC horizon also requires a current history-bearing document.
+    await refreshLiveSummary(env.DB, f.page.slug, T0 + 86400);
     expect((await publishCheckpoint(env.DB, store.kv, f.page.slug, T0 + 86400)).published).toBe(true);
     expect(store.puts()).toBe(2);
   });
