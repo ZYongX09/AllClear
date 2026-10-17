@@ -167,8 +167,10 @@ export default async function AdminPageDetail({
           </AdminForm>
         </div>
         <p className="text-xs leading-5 text-slate-500 dark:text-slate-400">
-          The slug is not editable: it is the public URL, the KV key, and the identifier in every
-          subscriber's feed reader.
+          The slug is not editable: it identifies the public URL, summary, checkpoints, and feed.
+          Saves update the D1 summary immediately server-side. Public hot caches across locations may
+          retain the previous summary for up to 30 seconds; this is not a globally simultaneous update.
+          KV fallback checkpoints run independently, every 600 seconds when due and within budget.
         </p>
       </section>
 
@@ -683,7 +685,7 @@ function SnapshotPanel({
       </ul>
       <p className="text-xs leading-5 text-slate-500 dark:text-slate-400">
         Derived at read time from active impacts and probe evidence, not stored. A component absent
-        from the snapshot is a rebuild that has not run, not a component that is fine.
+        from this summary may reflect cached or fallback data, not a component that is fine.
         {[...derived.values()].some((entry) => isFaultSeverity(entry.status))
           ? " At least one component is in a fault state."
           : ""}

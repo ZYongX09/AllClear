@@ -134,6 +134,8 @@ export interface Snapshot {
   snapshotVersion: number;
   /** When this document was assembled. */
   generatedAt: number;
+  /** When daily history was last computed, in epoch seconds; absent on legacy snapshots. */
+  historyComputedAt?: number | null;
   /** When the underlying page row last changed. */
   sourceUpdatedAt: number;
   sections: SnapshotSection[];
@@ -145,21 +147,28 @@ export interface Snapshot {
 /**
  * Which step of the read chain produced the data.
  *
- * `cache` is the colo-local copy written by the same call that writes KV. It is
- * only reached when KV has missed, and it is reported as its own value rather
- * than folded into `kv-fresh` because it is a different claim: KV is the
- * authority for every reader, whereas this copy is known only to the data centre
- * that wrote it. See docs/spec/snapshot.md.
+ * `d1-live` reads the current D1 materialized summary; `cache-live` is its
+ * short-lived hot-cache copy. Neither says the probes or daily history were
+ * just computed. Legacy values remain readable for older snapshots/consumers;
+ * KV checkpoints are fallback evidence, not confirmation of current D1 state.
  */
-export type SnapshotSource = "kv-fresh" | "cache" | "d1-rebuild" | "kv-last" | "none";
+export type SnapshotSource =
+  | "d1-live"
+  | "cache-live"
+  | "kv-fresh"
+  | "cache"
+  | "d1-rebuild"
+  | "kv-last"
+  | "none";
 
 export interface ReadResult {
   snapshot: Snapshot | null;
   source: SnapshotSource;
   /**
    * `true` when the read chain could not confirm the data is current — it was
-   * served from the last-known-good key because D1 was unreachable, or there was
-   * nothing to serve at all.
+   * served from a fallback checkpoint because the live summary was unavailable,
+   * or there was nothing to serve at all. Even a recently written KV checkpoint
+   * is unconfirmed and must be reported as stale.
    *
    * Note what this deliberately does *not* mean. It is not "the document is old":
    * a page whose content has not changed in an hour is perfectly current, and

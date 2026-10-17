@@ -43,7 +43,11 @@ export async function GET(
     status: 200,
     headers: {
       "Content-Type": "application/atom+xml; charset=utf-8",
-      "Cache-Control": "public, max-age=60",
+      // Entries describe recorded changes, not current health. Do not add an
+      // HTTP cache window on top of the summary cache or invent an update time.
+      "Cache-Control": "no-store",
+      "X-AllClear-Source": result.data.source,
+      "X-AllClear-Stale": String(result.data.stale),
     },
   });
 }

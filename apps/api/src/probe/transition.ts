@@ -239,6 +239,7 @@ SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?3
   FROM probe_state
  WHERE probe_target_id = ?2
    AND last_batch_nonce = ?8
+RETURNING public_id
 `;
 
 /**
@@ -260,6 +261,7 @@ SELECT ?1, t.component_id, t.id, NULL, t.severity,
    AND (SELECT last_batch_nonce FROM probe_state WHERE probe_target_id = ?5) = ?6
    AND (SELECT consecutive_failures FROM probe_state WHERE probe_target_id = ?5) >= t.failure_threshold
    AND NOT EXISTS (SELECT 1 FROM impact i WHERE i.probe_target_id = ?5 AND i.end_at IS NULL)
+RETURNING id
 `;
 
 /**
@@ -276,6 +278,7 @@ UPDATE impact
    AND end_at IS NULL
    AND (SELECT last_batch_nonce FROM probe_state WHERE probe_target_id = ?3) = ?4
    AND (SELECT consecutive_successes FROM probe_state WHERE probe_target_id = ?3) >= ?5
+RETURNING id
 `;
 
 /**
@@ -451,7 +454,9 @@ async function attemptTransition(
   let results: D1Result<unknown>[];
   try {
     results = await db.batch([
-      // S1 — the CAS, which is also what decides whether S2..S7 apply at all.
+      // CAS first. Every submitted dependent statement retains its nonce guard.
+      // No-op impact/log SQL is omitted; transactional triggers mirror the open
+      // pointer and persist public revisions for accepted samples/impacts.
       db
         .prepare(CAS_STATE_SQL)
         .bind(
@@ -479,30 +484,14 @@ async function attemptTransition(
           nonce,
         ),
 
-      db
-        .prepare(OPEN_IMPACT_SQL)
-        .bind(impactPublicId, firstFailedAt, observation.resultId, observedAt, targetId, nonce),
-
-      db
-        .prepare(CLOSE_IMPACT_SQL)
-        .bind(firstRecoveryAt, observedAt, targetId, nonce, state.recovery_threshold),
-
-      db.prepare(MIRROR_OPEN_IMPACT_SQL).bind(targetId, nonce),
-
-      db
-        .prepare(LOG_TRANSITION_SQL)
-        .bind(
-          transition === "none" ? null : newId(),
-          observation.resultId,
-          fromState,
-          toState,
-          impactPublicId,
-          transition === "opened" ? observedAt : null,
-          transition === "closed" ? observedAt : null,
-          observedAt,
-          targetId,
-          nonce,
-        ),
+      ...(shouldOpen ? [db.prepare(OPEN_IMPACT_SQL)
+        .bind(impactPublicId, firstFailedAt, observation.resultId, observedAt, targetId, nonce)] : []),
+      ...(shouldClose ? [db.prepare(CLOSE_IMPACT_SQL)
+        .bind(firstRecoveryAt, observedAt, targetId, nonce, state.recovery_threshold)] : []),
+      ...(transition !== "none" ? [db.prepare(LOG_TRANSITION_SQL).bind(
+        newId(), observation.resultId, fromState, toState, impactPublicId,
+        transition === "opened" ? observedAt : null,
+        transition === "closed" ? observedAt : null, observedAt, targetId, nonce)] : []),
 
       db.prepare(ADVANCE_NEXT_CHECK_SQL).bind(targetId, nextCheckAt, observedAt, nonce),
     ]);
@@ -511,7 +500,10 @@ async function attemptTransition(
     throw error;
   }
 
-  const [cas, inserted, opened, closed, , , advanced] = results;
+  const [cas, inserted] = results;
+  const opened = shouldOpen ? results[2] : undefined;
+  const closed = shouldClose ? results[2] : undefined;
+  const advanced = results[results.length - 1];
 
   if (changesOf(cas) === 0) {
     // Nothing else in the batch applied either — every later statement is
@@ -528,7 +520,7 @@ async function attemptTransition(
   // a statement that depends on those counters did something other than what
   // this same arithmetic predicted, the guards are wrong — surface it rather
   // than letting a half-correct state stand.
-  if (changesOf(inserted) !== 1) {
+  if (inserted?.results.length !== 1) {
     return {
       kind: "anomaly",
       detail: `CAS applied but the observation was not recorded (target ${targetId})`,
@@ -545,8 +537,8 @@ async function attemptTransition(
     };
   }
 
-  const openedRows = changesOf(opened);
-  const closedRows = changesOf(closed);
+  const openedRows = opened?.results.length ?? 0;
+  const closedRows = closed?.results.length ?? 0;
 
   if (transition === "opened" && openedRows !== 1) {
     return {

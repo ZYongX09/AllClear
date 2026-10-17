@@ -212,41 +212,46 @@ when no component contributed measurable time.
 
 ## Why `daily_uptime` exists, and how it stays honest
 
-`daily_uptime` is the only precomputed aggregate in the project. It exists for one
-reason: computing ninety days of uptime from `probe_result` on every page view would
-be thousands of rows per request. Everything else derives from raw data at read
-time; this is the exception, so it is the one place a stale value could hide.
+`daily_uptime` holds the historical aggregate. Computing ninety days from
+`probe_result` on every page view would be thousands of rows per request. The
+materialized live summary embeds those daily rows without recomputing them.
 
-Two properties keep it honest. The recompute is **idempotent and total** for a day:
-it reads the impacts and the probe results for that day and overwrites the row, so
-there is no incremental accumulation and a missed run is repaired by the next one
-rather than leaving a permanently wrong number. And every state transition
-recomputes the affected component's recent days immediately, so "today" is never a
-day behind.
+The recompute is idempotent and total for a day: it reads impacts and probe
+results, then overwrites the row. Recent history normally recomputes every 300
+seconds, independently of live summary updates. `historyComputedAt` records that
+work in epoch seconds; assembling a summary must not advance it or claim every
+historical day was refreshed.
 
-The recompute reads coverage from a window that starts one `gapMax` before the day,
-because the observation before midnight is what brackets the first covered second
-of the day; fetching only the day's own results would make every day appear to begin
-with an unmeasured gap. It recomputes two days rather than one, because an impact
-opened just before midnight and closed just after touches both. A full sweep of
-every component runs from cron hourly rather than per tick: it exists to finalise
-days that passed quietly, and running it every minute would recompute two days of
-every component sixty times an hour for the same answer. Transitions still
-recompute their own components immediately, so a live change is never a minute late.
+The recompute reads coverage from one `gapMax` before the day through one
+`gapMax` after it, bounded by `now`. Actual observations on both sides of midnight
+can bracket the boundary; future scheduled observations never count as evidence.
+Routine work recomputes today every 300 seconds. Impact transitions recompute
+today and yesterday together. A persisted finalization cursor processes closed
+days after a probe-interval-dependent grace period and catches up one day per
+tick after missed runs. Current status still derives from live evidence; history
+can legitimately lag and its computation time is displayed separately.
 
 ## Retention interaction: roll up before deleting
 
-Raw observations are retained for thirty days and then folded into `daily_uptime`
-and deleted. The order is the whole point and is enforced in
-`apps/api/src/lib/retention.ts`: the boundary day — the one about to fall out of
-the window, `now - 30 days` — is rolled up first, and the delete of everything
-older is gated on that rollup having succeeded for every component. If any
-component's rollup fails, nothing is deleted and the raw results survive to be
-retried next run. Deleting first would destroy the evidence for a day that has no
-`daily_uptime` row yet, and the loss would be invisible: the day would report
-`unknown` forever, which looks like "nobody measured it" rather than "we deleted
-the measurement". A growing table is a recoverable problem; missing evidence is
-not.
+Retention normally runs once per UTC day, with bounded catch-up chunks when
+expired work remains. The cutoff is UTC midnight thirty days before today.
+`apps/api/src/lib/retention.ts` processes one component-day per scheduled chunk:
+its aggregate is materialized and marked `archived` in the same transaction that
+purges that day's raw observations. Failure rolls back the chunk and preserves
+the evidence for retry; already committed chunks remain valid.
+
+After seeking the initial actual evidence date, the archive cursor advances
+through every intervening day, not just dates containing a sample. Neighboring
+observations or a manual impact can account for a sample-free day. Purging keeps
+the predecessor needed to bracket the next day and the accepted result referenced
+by `probe_state.last_result_id`; these anchors can survive beyond thirty days.
+Once catch-up completes, persisted scheduling prevents repeated scans that day.
+
+Archived aggregates are sealed: routine recomputation cannot overwrite them using
+purged evidence. Consequently, retroactive incident or maintenance edits do not
+automatically recalculate sealed days. Correcting those aggregates requires an
+explicit evidence-backed archival repair; the API must not imply that editing an
+old event restores observations that retention already deleted.
 
 ## Worked cases pinned by the tests
 
@@ -313,9 +318,9 @@ split explicitly.
   component and embeds them in the served snapshot, so the table is the read path
   for the public daily history rather than a write-only cache. Nothing here claims
   a wider history than that window, and no production read load has been measured.
-* **`computeDailyUptime` is not scheduled per component.** Cron recomputes
-  transition-affected components every tick and every component hourly; the
-  thirty-day boundary rollup is the retention pass.
+* **History has its own clock.** Recent history runs on a 300-second cadence;
+  the thirty-day boundary rollup belongs to the daily retention pass. Neither
+  is a claim that all retained days were remeasured at summary assembly time.
 
 ## Running
 

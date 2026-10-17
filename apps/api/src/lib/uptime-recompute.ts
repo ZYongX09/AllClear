@@ -65,19 +65,23 @@ export interface DailyUptimeRow {
   downtimeWeighted: number;
   uptime: number | null;
   worstStatus: Status;
+  /** Finalized immediately before raw evidence is purged. */
+  archived?: boolean;
 }
 
 const DAY_SECONDS = 86_400;
 
 const FAULT_SEVERITIES = new Set(["degraded_performance", "partial_outage", "full_outage"]);
 
+/** A bounded set of component/day requests shares four reads, not four per row. */
+export interface DailyUptimeRequest {
+  componentId: number;
+  day: string;
+}
+
 /**
- * Compute one component's uptime for one UTC day.
- *
- * Coverage is gathered from a window that starts one gap before the day and ends
- * at the day's end, because the observation *before* midnight is what brackets
- * the first covered second of the day. Fetching only the day's own results would
- * make every day look like it begins with an unmeasured gap.
+ * Read both neighbours of midnight. A successor is evidence only once it has
+ * actually been observed (`<= now`), never merely because a probe is due.
  */
 export async function computeDailyUptime(
   db: D1Database,
@@ -85,86 +89,94 @@ export async function computeDailyUptime(
   day: string,
   now: number,
 ): Promise<DailyUptimeRow | null> {
-  const dayStart = Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000);
-  if (!Number.isFinite(dayStart)) return null;
-  const dayEnd = dayStart + DAY_SECONDS;
+  return (await computeDailyUptimeBatch(db, [{ componentId, day }], now))[0] ?? null;
+}
 
-  const component = await db
-    .prepare("SELECT id, available_since FROM component WHERE id = ?1")
-    .bind(componentId)
-    .first<ComponentRow>();
-  if (!component) return null;
-
-  const targets = await db
-    .prepare(
-      `SELECT interval_seconds FROM probe_target
-        WHERE component_id = ?1 AND enabled = 1`,
-    )
-    .bind(componentId)
-    .all<TargetRow>();
-
-  const interval = targets.results.reduce(
-    (max, row) => Math.max(max, row.interval_seconds),
-    60,
-  );
-  const gapMax = defaultCoverageGapMax(interval);
-
+/** Null requests means all components for `days`; callers bound the day count. */
+export async function computeDailyUptimeBatch(
+  db: D1Database,
+  requests: DailyUptimeRequest[] | null,
+  now: number,
+  days: string[] = [utcDay(now)],
+): Promise<DailyUptimeRow[]> {
+  if (requests?.length === 0) return [];
+  const { results: components } = await db.prepare(
+    `SELECT c.id, c.available_since,
+            MAX(60, COALESCE(MAX(t.interval_seconds), 60)) AS interval_seconds,
+            (SELECT MAX(day) FROM daily_uptime d
+              WHERE d.component_id = c.id AND d.archived = 1) AS archived_through
+       FROM component c
+       LEFT JOIN probe_target t ON t.component_id = c.id AND t.enabled = 1
+      WHERE ?1 IS NULL OR c.id IN
+        (SELECT json_extract(value, '$.componentId') FROM json_each(?1))
+      GROUP BY c.id`,
+  ).bind(requests === null ? null : JSON.stringify(requests))
+    .all<ComponentRow & TargetRow & { archived_through: string | null }>();
+  const wanted = (requests ?? components.flatMap((c) => days.map((day) => ({ componentId: c.id, day }))))
+    .filter((r) => {
+      const component = components.find((c) => c.id === r.componentId);
+      return component && (component.archived_through === null || r.day > component.archived_through);
+    });
+  const spans = components.flatMap((component) => {
+    const starts = wanted.filter((r) => r.componentId === component.id)
+      .map((r) => Date.parse(`${r.day}T00:00:00Z`) / 1000).filter(Number.isFinite);
+    if (starts.length === 0) return [];
+    const gapMax = defaultCoverageGapMax(component.interval_seconds);
+    return [{ componentId: component.id, from: Math.min(...starts),
+      to: Math.max(...starts) + DAY_SECONDS, gapMax }];
+  });
+  if (spans.length === 0) return [];
+  const encoded = JSON.stringify(spans);
   const [impacts, maintenances, results] = await db.batch([
-    db
-      .prepare(
-        `SELECT severity, start_at, end_at, probe_target_id
-           FROM impact
-          WHERE component_id = ?1
-            AND start_at < ?3
-            AND (end_at IS NULL OR end_at > ?2)`,
-      )
-      .bind(componentId, dayStart, dayEnd),
-    // Selected by *window overlap only* — deliberately not by `ch.status`.
-    //
-    // A status filter here looks reasonable and is wrong in both directions.
-    // `status <> 'completed'` makes a past day's uptime change retroactively: the
-    // window is deducted while the maintenance runs and counted once someone
-    // marks it completed, so the same historical day reports a worse number after
-    // the fact, and deliberate downtime inside an announced window is charged as
-    // an outage. `status = 'in_progress'` has the same defect plus one more: a
-    // window whose operator never posted the update that moves it out of
-    // `scheduled` is silently ignored.
-    //
-    // The plan's rule is about the *window*, not about the change's present
-    // status: "maintenance windows are deducted from the denominator". Whether a
-    // window has started is already answered by the time overlap below, which is
-    // why an announced future window cannot be deducted early — `starts_at` is
-    // the announced start, so it does not intersect the day. And the exclusion
-    // cannot hide downtime regardless: `computeUptime` keeps any segment with a
-    // non-zero fault weight counted even when it falls inside a window.
-    db
-      .prepare(
-        `SELECT ch.starts_at, ch.ends_at
-           FROM change ch
-           JOIN change_component cc ON cc.change_id = ch.id
-          WHERE cc.component_id = ?1
-            AND ch.kind = 'maintenance'
-            AND ch.starts_at < ?3
-            AND (ch.ends_at IS NULL OR ch.ends_at > ?2)`,
-      )
-      .bind(componentId, dayStart, dayEnd),
-    db
-      .prepare(
-        `SELECT r.observed_at
-           FROM probe_result r
-           JOIN probe_target t ON t.id = r.probe_target_id
-          WHERE t.component_id = ?1
-            AND r.observed_at >= ?2
-            AND r.observed_at <= ?3
-          ORDER BY r.observed_at`,
-      )
-      .bind(componentId, dayStart - gapMax, dayEnd),
+    db.prepare(
+      `SELECT i.component_id, i.severity, i.start_at, i.end_at, i.probe_target_id
+         FROM json_each(?1) s JOIN impact i
+           ON i.component_id = json_extract(s.value, '$.componentId')
+        WHERE i.start_at < json_extract(s.value, '$.to')
+          AND (i.end_at IS NULL OR i.end_at > json_extract(s.value, '$.from'))`,
+    ).bind(encoded),
+    // Window overlap, not the maintenance change's current status, is evidence.
+    db.prepare(
+      `SELECT cc.component_id, ch.starts_at, ch.ends_at
+         FROM json_each(?1) s JOIN change_component cc
+           ON cc.component_id = json_extract(s.value, '$.componentId')
+         JOIN change ch ON ch.id = cc.change_id
+        WHERE ch.kind = 'maintenance'
+          AND ch.starts_at < json_extract(s.value, '$.to')
+          AND (ch.ends_at IS NULL OR ch.ends_at > json_extract(s.value, '$.from'))`,
+    ).bind(encoded),
+    db.prepare(
+      `SELECT t.component_id, r.observed_at
+         FROM json_each(?1) s JOIN probe_target t
+           ON t.component_id = json_extract(s.value, '$.componentId')
+         JOIN probe_result r ON r.probe_target_id = t.id
+          AND r.observed_at >= json_extract(s.value, '$.from') - json_extract(s.value, '$.gapMax')
+          AND r.observed_at <= MIN(json_extract(s.value, '$.to') + json_extract(s.value, '$.gapMax'), ?2)
+        ORDER BY t.component_id, r.observed_at`,
+    ).bind(encoded, now),
   ]);
+  return wanted.flatMap(({ componentId, day }) => {
+    const component = components.find((c) => c.id === componentId);
+    const dayStart = Date.parse(`${day}T00:00:00Z`) / 1000;
+    if (!component || !Number.isFinite(dayStart)) return [];
+    const gapMax = defaultCoverageGapMax(component.interval_seconds);
+    const impactRows = (impacts.results as unknown as (ImpactRow & { component_id: number })[])
+      .filter((r) => r.component_id === componentId);
+    const maintenanceRows = (maintenances.results as unknown as (MaintenanceRow & { component_id: number })[])
+      .filter((r) => r.component_id === componentId);
+    const resultRows = (results.results as unknown as (ProbeResultRow & { component_id: number })[])
+      .filter((r) => r.component_id === componentId && r.observed_at >= dayStart - gapMax
+        && r.observed_at <= Math.min(dayStart + DAY_SECONDS + gapMax, now));
+    return [calculateDailyUptime(componentId, day, dayStart, component, impactRows, maintenanceRows, resultRows, gapMax, now)];
+  });
+}
 
-  const impactRows = impacts.results as unknown as ImpactRow[];
-  const maintenanceRows = maintenances.results as unknown as MaintenanceRow[];
-  const resultRows = results.results as unknown as ProbeResultRow[];
-
+function calculateDailyUptime(
+  componentId: number, day: string, dayStart: number, component: ComponentRow,
+  impactRows: ImpactRow[], maintenanceRows: MaintenanceRow[], resultRows: ProbeResultRow[],
+  gapMax: number, now: number,
+): DailyUptimeRow {
+  const dayEnd = dayStart + DAY_SECONDS;
   const uptimeImpacts: UptimeImpact[] = [];
   const uptimeMaintenances: UptimeMaintenance[] = [];
 
@@ -222,31 +234,36 @@ export async function persistDailyUptime(
   row: DailyUptimeRow,
   now: number,
 ): Promise<void> {
-  await db
-    .prepare(
-      `INSERT INTO daily_uptime
-         (component_id, day, covered_seconds, unknown_seconds, downtime_weighted,
-          uptime, worst_status, computed_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-       ON CONFLICT(component_id, day) DO UPDATE SET
-         covered_seconds   = excluded.covered_seconds,
-         unknown_seconds   = excluded.unknown_seconds,
-         downtime_weighted = excluded.downtime_weighted,
-         uptime            = excluded.uptime,
-         worst_status      = excluded.worst_status,
-         computed_at       = excluded.computed_at`,
-    )
-    .bind(
-      row.componentId,
-      row.day,
-      row.coveredSeconds,
-      row.unknownSeconds,
-      row.downtimeWeighted,
-      row.uptime,
-      row.worstStatus,
-      now,
-    )
-    .run();
+  await persistDailyUptimeBatch(db, [row], now);
+}
+
+/** One SQL statement; D1 batch() alone does not reduce statement counts. */
+export function dailyUptimeStatement(
+  db: D1Database, rows: DailyUptimeRow[], now: number,
+): D1PreparedStatement {
+  return db.prepare(
+    `INSERT INTO daily_uptime
+       (component_id, day, covered_seconds, unknown_seconds, downtime_weighted,
+        uptime, worst_status, computed_at, archived)
+     SELECT json_extract(value, '$.componentId'), json_extract(value, '$.day'),
+            json_extract(value, '$.coveredSeconds'), json_extract(value, '$.unknownSeconds'),
+            json_extract(value, '$.downtimeWeighted'), json_extract(value, '$.uptime'),
+            json_extract(value, '$.worstStatus'), ?2, COALESCE(json_extract(value, '$.archived'), 0)
+       FROM json_each(?1) WHERE 1
+     ON CONFLICT(component_id, day) DO UPDATE SET
+       covered_seconds = excluded.covered_seconds,
+       unknown_seconds = excluded.unknown_seconds,
+       downtime_weighted = excluded.downtime_weighted,
+       uptime = excluded.uptime, worst_status = excluded.worst_status,
+       computed_at = excluded.computed_at, archived = excluded.archived
+     WHERE daily_uptime.archived = 0`,
+  ).bind(JSON.stringify(rows), now);
+}
+
+export async function persistDailyUptimeBatch(
+  db: D1Database, rows: DailyUptimeRow[], now: number,
+): Promise<void> {
+  if (rows.length > 0) await dailyUptimeStatement(db, rows, now).run();
 }
 
 /**
@@ -262,11 +279,10 @@ export async function recomputeRecentDays(
   now: number,
   days = TRANSITION_RECOMPUTE_DAYS,
 ): Promise<void> {
-  for (let offset = 0; offset < days; offset += 1) {
-    const day = utcDay(startOfUtcDay(now) - offset * DAY_SECONDS);
-    const row = await computeDailyUptime(db, componentId, day, now);
-    if (row !== null) await persistDailyUptime(db, row, now);
-  }
+  const requests = Array.from({ length: days }, (_, offset) => ({
+    componentId, day: utcDay(startOfUtcDay(now) - offset * DAY_SECONDS),
+  }));
+  await persistDailyUptimeBatch(db, await computeDailyUptimeBatch(db, requests, now), now);
 }
 
 /**
@@ -282,12 +298,9 @@ export async function recomputeAllRecentDays(
   now: number,
   days = TRANSITION_RECOMPUTE_DAYS,
 ): Promise<number> {
-  const { results } = await db
-    .prepare("SELECT id FROM component")
-    .all<{ id: number }>();
-
-  for (const component of results) {
-    await recomputeRecentDays(db, component.id, now, days);
-  }
-  return results.length;
+  const wanted = Array.from({ length: days }, (_, offset) =>
+    utcDay(startOfUtcDay(now) - offset * DAY_SECONDS));
+  const rows = await computeDailyUptimeBatch(db, null, now, wanted);
+  await persistDailyUptimeBatch(db, rows, now);
+  return new Set(rows.map((r) => r.componentId)).size;
 }

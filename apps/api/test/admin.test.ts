@@ -133,7 +133,7 @@ describe("version advancement and republication", () => {
     // leaving the rebuild to the next cron tick.
     const read = await callApi(`/api/status/${page.slug}`);
     const body = (await read.json()) as { source: string };
-    expect(body.source).toBe("kv-fresh");
+    expect(["cache-live", "d1-live"]).toContain(body.source);
   });
 
   it("advances the version for a delete as well", async () => {

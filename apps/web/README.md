@@ -31,3 +31,10 @@ own session gate and is not a model of the API's authorisation.
 
 **Stop this server before running `npm run build`** — both write to the same
 `.vinext`/`.cloudflare` output directory and will corrupt each other.
+
+Fixture status slugs under `/status/` exercise the read metadata independently:
+`fixture` (D1 live), `fixture-cached`, `fixture-fallback` (unconfirmed with expired
+probe evidence), `fixture-legacy` (missing history time), `fixture-history-unknown`
+(null history time), and `fixture-unavailable`. Assembly, history computation,
+and probe timestamps intentionally differ. These are development fixtures, not
+production health or browser-regression evidence.

@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { aggregateDayUptime, type SnapshotDay } from "../src/snapshot";
+import {
+  aggregateDayUptime,
+  deriveSnapshotComponent,
+  type ReadResult,
+  type Snapshot,
+  type SnapshotComponent,
+  type SnapshotDay,
+  type SnapshotSource,
+} from "../src/snapshot";
 
 /**
  * The number printed above a component's calendar.
@@ -20,6 +28,54 @@ function day(overrides: Partial<SnapshotDay> = {}): SnapshotDay {
     ...overrides,
   };
 }
+
+describe("snapshot compatibility and freshness", () => {
+  const now = 1_800_000_000;
+  const snapshot: Snapshot = {
+    slug: "test", name: "Test", snapshotVersion: 1,
+    generatedAt: now, sourceUpdatedAt: now - 600,
+    sections: [], components: [], changes: [],
+  };
+
+  it("accepts legacy snapshots without a history timestamp", () => {
+    expect(snapshot.historyComputedAt).toBeUndefined();
+  });
+
+  it("keeps history time nullable and in epoch seconds, independent of assembly time", () => {
+    const computed: Snapshot = { ...snapshot, historyComputedAt: now - 300 };
+    const unavailable: Snapshot = { ...snapshot, historyComputedAt: null };
+    expect(JSON.parse(JSON.stringify(computed)).historyComputedAt).toBe(now - 300);
+    expect(computed.historyComputedAt).not.toBe(computed.generatedAt);
+    expect(unavailable.historyComputedAt).toBeNull();
+  });
+
+  it.each<SnapshotSource>([
+    "d1-live", "cache-live", "kv-fresh", "cache", "d1-rebuild", "kv-last", "none",
+  ])("retains the ReadResult shape for %s", (source) => {
+    const result: ReadResult = {
+      snapshot: source === "none" ? null : snapshot,
+      source, stale: !["d1-live", "cache-live", "d1-rebuild"].includes(source),
+      ageSeconds: source === "none" ? null : 0, aged: false, errors: [],
+    };
+    expect(Object.keys(result).sort()).toEqual([
+      "ageSeconds", "aged", "errors", "snapshot", "source", "stale",
+    ]);
+  });
+
+  it("does not let a newly assembled summary refresh old probe evidence", () => {
+    const component: SnapshotComponent = {
+      publicId: "component", name: "Component", description: null,
+      sectionPublicId: null, orderId: 0, availableSince: now - 1_000,
+      probe: { targetPublicId: "probe", lastProbeAt: now - 121, ok: true },
+      statusFreshnessMax: 120, impacts: [], maintenances: [], changePublicIds: [], days: [],
+    };
+    expect(deriveSnapshotComponent(component, snapshot.generatedAt).status).toBe("unknown");
+    expect(deriveSnapshotComponent({ ...component, probe: null }, now).status).toBe("unknown");
+    expect(deriveSnapshotComponent({
+      ...component, probe: { ...component.probe!, lastProbeAt: now - 60 },
+    }, now).status).toBe("operational");
+  });
+});
 
 describe("aggregateDayUptime", () => {
   it("returns null with no days at all", () => {

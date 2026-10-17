@@ -11,8 +11,8 @@ npm run build     # builds packages/shared, then apps/web
 
 | Suite | Files | Tests | Runs against |
 |---|---|---|---|
-| `packages/shared` | 4 | 82 | plain Node |
-| `apps/api` | 10 | 212 | real `workerd` with a real D1 binding |
+| `packages/shared` | 4 | 92 | plain Node |
+| `apps/api` | 13 | 246 | real `workerd` with a real D1 binding, including 3 capacity scenarios |
 | `apps/web` | — | — | no suite yet; see below |
 
 ### `packages/shared` must be built before anything imports it
@@ -85,12 +85,14 @@ The consequence is a rule for writing tests here, not a defect to work around:
   disables every target before each test and `uptime-retention.test.ts` clears
   `probe_result`.
 
-### The clock is real
+### Clock control
 
-Routes under test read `Math.floor(Date.now() / 1000)`, so tests age database rows
-rather than pinning time. A test that needs "three days ago" writes a row with a
-three-day-old timestamp; it does not freeze the clock. Freezing would test the
-freeze.
+Route tests normally use the real clock and age their fixture rows. Scheduler
+and capacity tests control `Date.now()` or pass an explicit clock so that a full
+UTC day, midnight boundaries, and stopped-monitor freshness can be exercised
+without waiting in real time. Mocked HTTP responses replace external probe
+requests; accepted observations and storage operations still use local workerd
+and D1.
 
 ### Timeouts are raised on purpose
 
@@ -120,10 +122,32 @@ to "no cached copy" rather than throwing when the API is absent. That last group
 is the point: the cache is an optimisation, and the module's contract is that a
 missing or broken cache costs speed rather than correctness.
 
-What it does not cover is a real KV outage or a cross-colo miss. The layer's
-*placement* — last in the read chain, so a KV miss still rebuilds from D1 rather
-than serving a stale local copy — is asserted by `snapshot.test.ts`'s ordering
-tests, not here.
+These local cache tests do not establish cross-location behavior or rescue
+during a real outage. Snapshot integration tests must distinguish the 30-second
+live hot cache from legacy fallback cache and unconfirmed KV checkpoints; see
+[snapshot.md](snapshot.md). Production freshness and free-tier capacity need
+separate workload validation.
+
+### Storage-capacity regression
+
+`pipeline-capacity.test.ts` meters each executed SQL statement, including every
+statement in a batch, and sums actual local D1 `meta.rows_read`/`rows_written`.
+It also counts attempted KV reads and puts. Global fixtures reset pages,
+publication budgets, and every maintenance cursor between scenarios.
+
+The five-target, one-page, sixty-second healthy scenario executes 1,440 ticks
+with a preceding day of samples already present. Its measured result is 7,200
+new observations, 288 KV puts, zero KV gets, 2,405,044 D1 rows read, 62,962 rows
+written, and at most 34 SQL statements in one tick. The fault/recovery scenario
+peaks at 42 statements. With 223,200 retained samples seeded, the thirty-tick
+retention scenario reads 94,690 rows, writes 4,936, and purges 3,570 expired
+observations while preserving required anchors.
+
+These are local regression workload measurements, not a production billing
+forecast or an account-wide Free-tier guarantee. Visitors, retries, more pages,
+incident history, additional services, and runtime query plans can add work.
+The full-day test has an explicit 600-second test timeout; run the capacity file
+separately when iterating on faster suites.
 
 ## `apps/web` — no suite yet
 

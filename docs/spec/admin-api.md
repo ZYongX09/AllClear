@@ -119,11 +119,10 @@ re-check which kind each one is.
 
 | Method | Path | Purpose | Validation |
 | --- | --- | --- | --- |
-| `POST` | `/pages/:slug/rebuild` | Advance the version, rebuild the snapshot and rewrite KV. | None. |
+| `POST` | `/pages/:slug/rebuild` | Advance the version and refresh the D1 summary; checkpoint admission remains budgeted. | None. |
 
 One further route is not under `/internal/admin`:
-`POST /internal/snapshot/:slug/rebuild` in `apps/api/src/index.ts` rebuilds and
-republishes but does **not** advance `page.snapshot_version`. It is the exception
+`POST /internal/snapshot/:slug/rebuild` in `apps/api/src/index.ts` rebuilds the D1 summary but does **not** advance `page.snapshot_version`. It is the exception
 to the rule below, and it is safe because it does not change page content — the
 embedded version already equals the stored one.
 
@@ -153,28 +152,19 @@ Errors that are not `ValidationError` are logged and returned as
 `500 { ok: false, error: "internal_error", detail: "<message>" }`. The `detail`
 member carries the raw error message.
 
-## Every write advances the version and republishes
+## Admin writes refresh the D1 summary
 
-The rule is that any write changing public output must advance
-`page.snapshot_version` and republish KV synchronously. It is enforced by
-structure rather than by discipline: every mutating operation in `service.ts` is
-wrapped in `withPublish`, which runs the operation and then calls
-`publishSnapshot`, which is `bumpSnapshotVersion` → `buildSnapshot` →
-`writeSnapshot`. The module header states the reason — a write that forgets to
-republish is invisible, because the API returns 200 and the database is correct
-while the page silently serves the old document. The test "advances the version
-and rewrites KV on every write" asserts `page.snapshot_version` moved by exactly
-one, that the KV document's embedded `snapshotVersion` matches, and that a
-subsequent read reports `source: "kv-fresh"`. "advances the version for a delete
-as well" covers deletion, which is the operation most likely to be forgotten.
+Public-output mutations advance `page.snapshot_version` and refresh the
+materialized D1 summary synchronously server-side. Public reads normally report
+`d1-live` or `cache-live`, not `kv-fresh`. A save does not purge every location's
+hot cache: the previous summary can remain visible for up to 30 seconds, and no
+global linearizability is promised.
 
-The exceptions, all of which republish without advancing, are the paths that do
-not change page content: `POST /internal/snapshot/:slug/rebuild`, the read
-chain's own `d1-rebuild` step, and cron's repair pass. `POST
-/internal/admin/pages/:slug/rebuild` is **not** an exception — it calls
-`publishSnapshot` and does advance. See
-[snapshot.md](snapshot.md) for why the counter exists and how the repair pass
-compares it.
+KV checkpoints are independent of the save: two keys are due every 600 seconds,
+subject to a shared deployment budget. Manual rebuild and repair are not an
+unlimited write-budget bypass or a promise that KV has immediately changed.
+The internal repair rebuild does not advance the content version; the admin
+rebuild does. See [snapshot.md](snapshot.md) for source and freshness semantics.
 
 `audit_log` is written on every mutation with `actor_admin_user_id` set to NULL,
 because there is no authenticated actor to record.

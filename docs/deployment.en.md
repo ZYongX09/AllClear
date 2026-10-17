@@ -158,7 +158,7 @@ For a different page slug, change `DEFAULT_STATUS_SLUG: bindings.text("your-page
 
 Set the API's `PUBLIC_BASE_URL` to the canonical web origin, such as `https://status.example.com` or the actual `workers.dev` address, and redeploy the API. Do not use the API address, a `/status/example` path, or a URL with query parameters.
 
-> **Important:** Unknown does not necessarily mean a failed probe. An unconfigured target, no observations, expired evidence, or the snapshot-refresh issue below can all result in unknown status. Reloading the browser does not force a server-side snapshot rebuild.
+> **Important:** Unknown does not necessarily mean a failed probe. An unconfigured target, no observations, expired evidence, or an unconfirmed fallback summary can all result in unknown status. Reloading the browser does not force a server-side snapshot rebuild.
 
 ## Configuration reference
 
@@ -167,7 +167,7 @@ Set the API's `PUBLIC_BASE_URL` to the canonical web origin, such as `https://st
 | Name | Type | Purpose |
 | --- | --- | --- |
 | `DB` | D1 binding | Pages, components, incidents, subscriptions, and observations; required |
-| `SNAPSHOT_KV` | KV binding | Published public snapshots; required |
+| `SNAPSHOT_KV` | KV binding | Budgeted fallback checkpoints, not the normal live source; required |
 | `INTERNAL_KEY` | Secret | Protects internal endpoints; required, matching the web Worker |
 | `PUBLIC_BASE_URL` | Variable | Absolute web origin; required for confirmation and incident email |
 | `MAX_TARGETS_PER_RUN` | Variable | Targets processed per trigger, default `"20"`, maximum 20 |
@@ -256,13 +256,13 @@ Pushing source does not automatically deploy this repository's Workers. If you a
 
 ## Known issues
 
-### Continuously successful probes may not refresh public snapshots
+### Independent update clocks and fallback limits
 
-Static tracing found that after observations are written, the scheduled task publishes snapshots only for pages whose probe impacts opened or closed. Continued healthy observations and uptime updates may therefore be absent from existing snapshots. The repair pass can also skip a snapshot whose version has not changed. Initial or subsequent successful checks may not appear publicly, and old evidence may expire into unknown status.
+The low-write pipeline replaces transition-only KV publication. Successful observations update live evidence in a D1 materialized summary even when no impact opens or closes. Admin writes update that summary immediately server-side; a hot cache in another location may retain the previous summary for up to 30 seconds. This is not globally linearizable publication.
 
-This is a source-inspection finding, not a reproduced runtime scenario. As a temporary diagnostic, use **Page → Rebuild snapshot** at `/admin/pages/<slug>`. This reflects current data but does not repair ongoing publication. Repeated manual rebuilds are not a production-monitoring solution and should not underpin freshness or alert-timing promises.
+Default probes remain every 60 seconds with a 120-second freshness budget. Daily history rolls up every 300 seconds and exposes `historyComputedAt` as epoch seconds (missing/null means unavailable); it is not refreshed by assembling a new summary. KV checkpoints are due every 600 seconds, write two keys, and have an independent deployment-wide budget. Due work can be deferred; a rebuild does not guarantee immediate KV publication. Retention runs daily, with rollup before deletion.
 
-Relevant code: [probe results](../apps/api/src/probe/run.ts), [scheduling and publication](../apps/api/src/index.ts), and [snapshot reads](../apps/api/src/snapshot.ts).
+`d1-live` and `cache-live` identify normal reads; KV fallback is unconfirmed (`stale: true`) even when recent. JSON is `no-store`, without an extra stale-while-revalidate window. Compare each probe's own timestamp rather than treating summary assembly time as a health check. Verify these paths and your D1/KV usage before relying on them; no free-tier capacity or production freshness is claimed. See the [snapshot contract](spec/snapshot.md).
 
 ### Capacity and operational boundaries
 
@@ -280,7 +280,7 @@ Relevant code: [probe results](../apps/api/src/probe/run.ts), [scheduling and pu
 
 **Console login or writes are refused.** Confirm the web Worker has an actual `ADMIN_TOKEN`, both Workers have identical `INTERNAL_KEY` values, and the Service Binding references the correct API. Changing the admin passphrase invalidates existing sessions.
 
-**Probes do not run, or status remains unknown.** Check trigger propagation, Worker logs, the target URL, and last-check data, then inspect the known snapshot-refresh issue. `localhost`, private addresses, credential-bearing URLs, and redirecting endpoints are unsuitable targets. Do not disable address validation to work around a configuration error.
+**Probes do not run, or status remains unknown.** Check trigger propagation, Worker logs, the target URL, and last-check data, then inspect JSON source/staleness, summary assembly time, history computation time, and the actual probe timestamp. `localhost`, private addresses, credential-bearing URLs, and redirecting endpoints are unsuitable targets. Do not disable address validation to work around a configuration error.
 
 **Subscription succeeds, but no confirmation arrives.** Check whether the default recording sender is still active, then inspect the sending binding, domain, sender address, recipient policy, public origin, quota, and logs. Request success is not delivery success.
 

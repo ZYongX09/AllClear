@@ -1,44 +1,6 @@
-/**
- * The colo-local snapshot cache.
- *
- * ## What failure this layer covers
- *
- * It is the last step of the read chain, reached only when KV could not answer
- * *and* D1 could not rebuild. That placement is the whole design, so it is worth
- * stating why the other two obvious placements were rejected.
- *
- * Placing it before the D1 rebuild would save a read subrequest on every KV miss,
- * which is a real saving. It was rejected because it makes healthy reads staler:
- * on a KV miss the chain would serve a locally cached document up to
- * `CACHE_TTL_SECONDS` old instead of rebuilding current data from D1, and every
- * status page read is a request for the *current* state. Trading freshness for
- * subrequests is the wrong trade on the path that is supposed to be the good one.
- *
- * Placing it beside `snapshot:<slug>:last` was also rejected, because it does not
- * cover a failure that `:last` does not already cover. `:last` is written by the
- * same call that writes the fresh key and is never expired, so it handles "D1 is
- * down" completely — and it is in KV, which is exactly what this layer is not.
- *
- * So the role is: **`kv-last` covers D1 being unavailable; this covers KV being
- * unavailable.** They are different failures and neither hedge substitutes for
- * the other. A data centre that wrote or read a page recently still has it when
- * KV cannot be reached at all.
- *
- * ## The trade, stated
- *
- * A hit here is reported as `source: "cache"` with `stale: true`, because the
- * read chain could not confirm the document is current — the same claim `kv-last`
- * makes. It can be up to `CACHE_TTL_SECONDS` old, and because the copy is local,
- * a different data centre may already have a newer one. Nothing replicates it, so
- * it is not a consistency mechanism and must never be described as one.
- *
- * ## Why every operation is wrapped
- *
- * The Cache API is an optimisation and must never be able to fail a read. It is
- * also not present in every runtime this code runs under — the vitest `workerd`
- * environment in particular does not guarantee it. So every entry point here
- * checks for the API, swallows its errors, and degrades to "no cached copy".
- * A read that cannot use the cache is slower, not broken.
+/** Separate colo-local keys: 30s live hot path and 1h explicitly stale hedge.
+ * Neither replicates between colos. Cache failures degrade to D1/KV; timestamps
+ * inside a snapshot are never renewed when caching it.
  */
 
 import type { Snapshot } from "@allclear/shared";
@@ -81,7 +43,9 @@ export async function readSnapshotFromCache(slug: string): Promise<Snapshot | nu
   try {
     const hit = await cache.match(snapshotCacheRequest(slug));
     if (!hit) return null;
-    return JSON.parse(await hit.text()) as Snapshot;
+    const parsed = JSON.parse(await hit.text()) as Partial<Snapshot> | null;
+    return parsed && typeof parsed.slug === "string" && typeof parsed.generatedAt === "number" &&
+      Array.isArray(parsed.components) && Array.isArray(parsed.sections) && Array.isArray(parsed.changes) ? parsed as Snapshot : null;
   } catch {
     return null;
   }
@@ -116,12 +80,38 @@ export async function writeSnapshotToCache(snapshot: Snapshot): Promise<void> {
   }
 }
 
+export const LIVE_CACHE_TTL_SECONDS = 30;
+
+export function liveSnapshotCacheRequest(slug: string): Request {
+  return new Request(`${CACHE_ORIGIN}/snapshot-live/${encodeURIComponent(slug)}`);
+}
+
+export async function readLiveSnapshotFromCache(slug: string, now: number): Promise<Snapshot | null> {
+  try {
+    const hit = await defaultCache()?.match(liveSnapshotCacheRequest(slug));
+    if (!hit) return null;
+    const cachedAt = Number(hit.headers.get("X-Allclear-Cached-At"));
+    if (!Number.isFinite(cachedAt) || now < cachedAt || now - cachedAt >= LIVE_CACHE_TTL_SECONDS) return null;
+    const parsed = JSON.parse(await hit.text()) as Partial<Snapshot> | null;
+    return parsed && typeof parsed.slug === "string" && typeof parsed.generatedAt === "number" &&
+      Array.isArray(parsed.components) && Array.isArray(parsed.sections) && Array.isArray(parsed.changes) ? parsed as Snapshot : null;
+  } catch { return null; }
+}
+
+export async function writeLiveSnapshotToCache(snapshot: Snapshot, now: number): Promise<void> {
+  try {
+    await defaultCache()?.put(liveSnapshotCacheRequest(snapshot.slug), new Response(JSON.stringify(snapshot), {
+      headers: { "Content-Type": "application/json", "Cache-Control": `public, max-age=${LIVE_CACHE_TTL_SECONDS}`, "X-Allclear-Cached-At": String(now) },
+    }));
+  } catch { /* Optimisation only. */ }
+}
+
 /** Drop the local copy. Used by the admin rebuild path so a repair is visible. */
 export async function purgeSnapshotFromCache(slug: string): Promise<void> {
   const cache = defaultCache();
   if (cache === null) return;
   try {
-    await cache.delete(snapshotCacheRequest(slug));
+    await Promise.all([cache.delete(snapshotCacheRequest(slug)), cache.delete(liveSnapshotCacheRequest(slug))]);
   } catch {
     // Nothing to do: the entry expires on its own.
   }

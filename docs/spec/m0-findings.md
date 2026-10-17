@@ -16,6 +16,11 @@ hostname are omitted here: they are not needed to reproduce any finding below,
 and this document is public. What matters is recorded — a Workers.dev subdomain
 had to exist for cron to work at all (see finding 4).
 
+This is a historical M0 record, not the current read-chain specification. The
+low-write pipeline uses D1 summaries and short hot caching, with unconfirmed KV
+checkpoints only as fallback; see [snapshot.md](snapshot.md). The KV-first order
+and age-derived staleness below describe the experiment at that revision.
+
 ## Verified items
 
 Each row is a capability the plan required, the evidence that it holds, and the

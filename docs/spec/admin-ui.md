@@ -119,7 +119,11 @@ where a stale snapshot is discovered. The `SnapshotPanel` derives each
 component's status from the published evidence using the same pure functions the
 public page uses, so the console and the status page cannot disagree about what
 the data means. Sections, components, probe targets, change history and
-hand-entered impacts each get a panel with their own forms.
+hand-entered impacts each get a panel with their own forms. Saves update the
+D1 summary immediately server-side; the console explains that global hot caches
+can retain a prior summary for up to 30 seconds and budgeted two-key KV
+checkpoints are independently due every 600 seconds, not globally simultaneous
+publication.
 
 The panel shows statuses the admin view cannot: `unknown` for a component with no
 probe target, and `unknown` for one whose probe has gone stale. Those are the

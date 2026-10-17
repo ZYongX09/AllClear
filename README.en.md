@@ -21,7 +21,7 @@ AllClear helps you publish a status page for websites, APIs, and other online se
 
 The project is for developers and teams who want to deploy their own instance, control their data, and adapt the software. It runs on Cloudflare without a long-running server or a separate status-page SaaS subscription. The services you monitor do not need to run on Cloudflare.
 
-> **Early preview:** Read the [operating limits](#operating-limits) before deploying. Do not use AllClear as your sole production alerting source; in particular, review the snapshot-refresh issue and email-delivery requirements.
+> **Early preview:** Read the [operating limits](#operating-limits) before deploying. Do not use AllClear as your sole production alerting source; in particular, validate the independent summary-cache, history-rollup, and email-delivery timing.
 
 ## Features
 
@@ -41,7 +41,7 @@ The project is for developers and teams who want to deploy their own instance, c
 
 ## Self-hosting
 
-The supported deployment target is **Cloudflare Workers**, with D1 for application data, KV for public snapshots, and Cron Triggers for scheduled probes. A custom domain is optional; you can start with a Cloudflare-provided `workers.dev` address.
+The supported deployment target is **Cloudflare Workers**, with D1 for application data and materialized live summaries, KV for fallback checkpoints, and Cron Triggers for scheduled probes. A custom domain is optional; you can start with a Cloudflare-provided `workers.dev` address.
 
 ### Prerequisites
 
@@ -82,11 +82,11 @@ Visitors / administrators
   Status pages and console                 │
                                      ┌─────┴─────┐
                                      D1         KV
-                                Application   Public
-                                    data     snapshots
+                                Data +       Fallback
+                                summaries    checkpoints
 ```
 
-The web Worker handles presentation and admin interactions. The API Worker manages data, probes, and snapshot publication. The API has no public route by default, and admin requests also require a shared service key. Public pages read snapshots and indicate stale or unavailable data.
+The web Worker handles presentation and admin interactions. The API Worker manages data, probes, and snapshot publication. The API has no public route by default, and admin requests also require a shared service key. Public pages normally read a materialized D1 summary or its 30-second hot cache; KV is unconfirmed fallback only. Default probes remain 60 seconds with 120-second freshness, history rolls up every 300 seconds, budgeted two-key KV checkpoints are due every 600 seconds, and retention runs daily. Assembly, history-computation, and probe times are distinct; admin writes do not promise globally simultaneous visibility.
 
 Built with **TypeScript, React, Next.js / vinext, Hono, Tailwind CSS, Cloudflare Workers, D1, and KV**. See the [engineering notes](docs/engineering.md) for architecture and consistency details.
 
@@ -123,7 +123,7 @@ Stop the preview server before building to avoid concurrent writes to the build 
 
 ## Operating limits
 
-- **Snapshot refresh:** Static inspection found that continuously successful probes may not refresh an already published snapshot, leaving public pages with stale data or unknown status. You can currently rebuild a snapshot from the console, but this is not a substitute for continuous monitoring. See [known issues](docs/deployment.en.md#known-issues).
+- **Update timing:** Admin writes update the D1 summary immediately server-side, but hot caches across locations can retain the previous summary for up to 30 seconds. History rollups and budgeted KV fallback checkpoints update independently. Successful observations now refresh live evidence without requiring an impact transition. Production freshness and free-tier capacity remain unvalidated; see [known issues](docs/deployment.en.md#known-issues).
 - **Probe scale:** The current supported deployment budget is 20 enabled targets, with a minimum interval of 60 seconds and one enabled target per component. Probes run from Cloudflare, not an independent multi-region consensus network.
 - **Notifications:** Probe-generated impacts do not automatically create timeline incidents or send incident emails. Email delivery requires a real sending binding; the default configuration does not deliver confirmation messages.
 - **Admin access:** The console uses a shared admin passphrase, not a multi-user role and permission system.

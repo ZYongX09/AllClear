@@ -73,6 +73,7 @@ export interface ProbeRunSummary {
   transitionedPageIds: number[];
   /** Component ids whose daily uptime must be recomputed after this run. */
   affectedComponentIds: number[];
+  transitionedComponentIds: number[];
   skippedReason?: string;
 }
 
@@ -132,6 +133,7 @@ export async function runProbes(
     affectedPageIds: [],
     transitionedPageIds: [],
     affectedComponentIds: [],
+    transitionedComponentIds: [],
   };
 
   const { results: due } = await db
@@ -145,6 +147,7 @@ export async function runProbes(
   const pages = new Set<number>();
   const transitionedPages = new Set<number>();
   const components = new Set<number>();
+  const transitionedComponents = new Set<number>();
 
   for (const target of due) {
     // The URL was validated when it was configured, but it is validated again
@@ -194,7 +197,10 @@ export async function runProbes(
         summary.applied += 1;
         if (outcome.transition === "opened") summary.opened += 1;
         if (outcome.transition === "closed") summary.closed += 1;
-        if (outcome.transition !== "none") transitionedPages.add(target.page_id);
+        if (outcome.transition !== "none") {
+          transitionedPages.add(target.page_id);
+          transitionedComponents.add(target.component_id);
+        }
         pages.add(target.page_id);
         components.add(target.component_id);
         break;
@@ -218,6 +224,7 @@ export async function runProbes(
   summary.affectedPageIds = [...pages];
   summary.transitionedPageIds = [...transitionedPages];
   summary.affectedComponentIds = [...components];
+  summary.transitionedComponentIds = [...transitionedComponents];
   return summary;
 }
 

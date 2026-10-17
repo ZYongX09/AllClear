@@ -1,50 +1,4 @@
-/**
- * Snapshot construction and the public read chain.
- *
- * ## The read chain
- *
- * The ordering is written out here rather than left implicit, because "which
- * source answered" is the single most useful thing to know when a status page
- * looks wrong:
- *
- *   1. KV fresh   — the normal path. Does not touch D1 at all.
- *   2. D1 rebuild — reached on a KV miss (cold cache, evicted key). Rebuilds the
- *                   snapshot and repopulates KV and the colo-local copy.
- *   3. KV last    — reached only when D1 is also unavailable. Serves the last
- *                   known good snapshot.
- *   4. cache      — reached when KV itself could not answer, which is the one
- *                   failure `:last` cannot cover because `:last` is also in KV.
- *                   See `cache.ts`.
- *   5. none       — nothing to serve. The caller must render an explicit
- *                   "unavailable" state rather than an empty-but-plausible page.
- *
- * ## `stale` means "unconfirmed", not "old"
- *
- * M0 surfaced this as an open question and M2 settles it here. The original
- * implementation derived `stale` from the *document's* age, which made the flag
- * permanently true for any page whose content had not changed in five minutes —
- * a status page for a stable service would light up its own warning indicator
- * forever, and an indicator that is always on is an indicator nobody reads.
- *
- * So the two facts are now reported separately:
- *
- *   * `stale` — the read chain could not *confirm* the data is current, because
- *     it fell back to the last-known-good key or had nothing to serve. This is a
- *     statement about the read path.
- *   * `ageSeconds` / `aged` — how old the document is. This is a statement about
- *     the document.
- *
- * Both are true at different times, and collapsing them into one boolean forces
- * a choice between a flag that lies and a flag that never turns off.
- *
- * ## The snapshot carries evidence, not verdicts
- *
- * No component status is stored. Status depends on `now`: a maintenance window
- * ending, or an impact interval closing, changes the correct answer without any
- * write happening — so a stored status goes stale in a way no version bump can
- * detect. The snapshot carries the intervals and the latest probe result, and
- * the reader derives the status at its own clock. See `packages/shared/src/snapshot.ts`.
- */
+/** D1 live summary first; durable KV checkpoints are explicitly eventual fallbacks. */
 
 import {
   DEFAULT_AGE_WARNING_SECONDS,
@@ -70,7 +24,7 @@ import {
   type Status,
 } from "@allclear/shared";
 
-import { readSnapshotFromCache, writeSnapshotToCache } from "./cache";
+import { readSnapshotFromCache, writeSnapshotToCache, readLiveSnapshotFromCache, writeLiveSnapshotToCache } from "./cache";
 
 export { freshKey, lastKey } from "@allclear/shared";
 export type { ReadResult, Snapshot } from "@allclear/shared";
@@ -88,6 +42,8 @@ interface PageRow {
   name: string;
   snapshot_version: number;
   updated_at: number;
+  live_revision: number;
+  urgent_revision: number;
 }
 
 interface SectionRow {
@@ -163,6 +119,7 @@ interface DailyUptimeRow {
   worst_status: string;
   covered_seconds: number;
   unknown_seconds: number;
+  computed_at: number;
 }
 
 const FAULT_SEVERITIES: readonly FaultSeverity[] = [
@@ -176,120 +133,54 @@ function isFaultSeverity(value: string): value is FaultSeverity {
 }
 
 /** Assemble a snapshot from D1. Throws if the page does not exist. */
-export async function buildSnapshot(
+export async function buildSnapshot(db: D1Database, slug: string, options: { now?: number } = {}): Promise<Snapshot> {
+  return (await buildSnapshotEvidence(db, slug, options)).snapshot;
+}
+
+export interface SnapshotEvidence {
+  snapshot: Snapshot;
+  page: PageRow;
+}
+
+/** Metadata and evidence are read in the SAME transaction, never relabelled later. */
+export async function buildSnapshotEvidence(
   db: D1Database,
   slug: string,
   options: { now?: number } = {},
-): Promise<Snapshot> {
+): Promise<SnapshotEvidence> {
   const now = options.now ?? Math.floor(Date.now() / 1000);
-
-  const page = await db
-    .prepare("SELECT id, slug, name, snapshot_version, updated_at FROM page WHERE slug = ?1")
-    .bind(slug)
-    .first<PageRow>();
-
-  if (!page) throw new Error(`no page with slug ${slug}`);
-
   const historyFloor = utcDay(now - (HISTORY_DAYS - 1) * 86_400);
   const changeFloor = now - CHANGE_HISTORY_SECONDS;
 
-  // One round trip for everything that depends only on the page id. Reads in a
-  // `batch` run as a transaction, which is what makes the assembled document
-  // internally consistent: no write can land between the components query and
-  // the impacts query and produce a snapshot describing a state that never
-  // existed.
-  const [
-    sectionsResult,
-    componentsResult,
-    probesResult,
-    impactsResult,
-    changesResult,
-    changeComponentsResult,
-    updatesResult,
-    updateComponentsResult,
-    dailyResult,
-  ] = await db.batch([
-    db
-      .prepare(
-        "SELECT id, public_id, name, description, order_id FROM section WHERE page_id = ?1 ORDER BY order_id, id",
-      )
-      .bind(page.id),
-    db
-      .prepare(
-        `SELECT id, public_id, name, description, section_id, order_id, available_since
-           FROM component WHERE page_id = ?1 ORDER BY order_id, id`,
-      )
-      .bind(page.id),
-    db
-      .prepare(
-        `SELECT t.public_id AS target_public_id, t.component_id, t.interval_seconds,
-                s.last_probe_at,
-                (SELECT r.ok FROM probe_result r
-                  WHERE r.probe_target_id = t.id
-                  ORDER BY r.observed_at DESC, r.id DESC LIMIT 1) AS last_ok
-           FROM probe_target t
-           JOIN component c ON c.id = t.component_id
-           LEFT JOIN probe_state s ON s.probe_target_id = t.id
-          WHERE c.page_id = ?1 AND t.enabled = 1`,
-      )
-      .bind(page.id),
-    // Only impacts that could still be active at a *later* read time. One that
-    // had already closed before this build can only be inactive afterwards too.
-    db
-      .prepare(
-        `SELECT i.component_id, i.severity, i.start_at, i.end_at
-           FROM impact i
-           JOIN component c ON c.id = i.component_id
-          WHERE c.page_id = ?1 AND (i.end_at IS NULL OR i.end_at >= ?2)`,
-      )
-      .bind(page.id, now),
-    db
-      .prepare(
-        `SELECT id, public_id, kind, status, title, body, severity,
-                starts_at, ends_at, scheduled_start_at, scheduled_end_at
-           FROM change
-          WHERE page_id = ?1 AND (ends_at IS NULL OR ends_at >= ?2)
-          ORDER BY starts_at DESC, id DESC
-          LIMIT ?3`,
-      )
-      .bind(page.id, changeFloor, MAX_CHANGES),
-    db
-      .prepare(
-        `SELECT cc.change_id, cc.component_id
-           FROM change_component cc
-           JOIN change ch ON ch.id = cc.change_id
-          WHERE ch.page_id = ?1`,
-      )
-      .bind(page.id),
-    db
-      .prepare(
-        `SELECT u.id, u.public_id, u.change_id, u.status, u.body, u.created_at
-           FROM change_update u
-           JOIN change ch ON ch.id = u.change_id
-          WHERE ch.page_id = ?1
-          ORDER BY u.created_at, u.id`,
-      )
-      .bind(page.id),
-    db
-      .prepare(
-        `SELECT uc.change_update_id, uc.component_id
-           FROM change_update_component uc
-           JOIN change_update u ON u.id = uc.change_update_id
-           JOIN change ch ON ch.id = u.change_id
-          WHERE ch.page_id = ?1`,
-      )
-      .bind(page.id),
-    db
-      .prepare(
-        `SELECT u.component_id, u.day, u.uptime, u.worst_status,
-                u.covered_seconds, u.unknown_seconds
-           FROM daily_uptime u
-           JOIN component c ON c.id = u.component_id
-          WHERE c.page_id = ?1 AND u.day >= ?2
-          ORDER BY u.day`,
-      )
-      .bind(page.id, historyFloor),
-  ]);
+  // A single SQLite statement is a consistent read, including the revision
+  // stamped on the document. Each subquery is constrained to this page.
+  const data = await db.prepare(`SELECT
+    (SELECT json_group_array(json_object('id',id,'slug',slug,'name',name,'snapshot_version',snapshot_version,'updated_at',updated_at,'live_revision',live_revision,'urgent_revision',urgent_revision)) FROM (SELECT id,slug,name,snapshot_version,updated_at,live_revision,urgent_revision FROM page WHERE slug=?1)) AS page,
+    (SELECT json_group_array(json_object('id',id,'public_id',public_id,'name',name,'description',description,'order_id',order_id)) FROM (SELECT id,public_id,name,description,order_id FROM section WHERE page_id=(SELECT id FROM page WHERE slug=?1) ORDER BY order_id,id)) AS sections,
+    (SELECT json_group_array(json_object('id',id,'public_id',public_id,'name',name,'description',description,'section_id',section_id,'order_id',order_id,'available_since',available_since)) FROM (SELECT id,public_id,name,description,section_id,order_id,available_since FROM component WHERE page_id=(SELECT id FROM page WHERE slug=?1) ORDER BY order_id,id)) AS components,
+    (SELECT json_group_array(json_object('target_public_id',target_public_id,'component_id',component_id,'interval_seconds',interval_seconds,'last_probe_at',last_probe_at,'last_ok',last_ok)) FROM (SELECT t.public_id AS target_public_id,t.component_id,t.interval_seconds,s.last_probe_at,(SELECT r.ok FROM probe_result r WHERE r.public_id=s.last_result_id) AS last_ok FROM probe_target t JOIN component c ON c.id=t.component_id LEFT JOIN probe_state s ON s.probe_target_id=t.id WHERE c.page_id=(SELECT id FROM page WHERE slug=?1) AND t.enabled=1)) AS probes,
+    (SELECT json_group_array(json_object('component_id',component_id,'severity',severity,'start_at',start_at,'end_at',end_at)) FROM (SELECT i.component_id,i.severity,i.start_at,i.end_at FROM impact i JOIN component c ON c.id=i.component_id WHERE c.page_id=(SELECT id FROM page WHERE slug=?1) AND (i.end_at IS NULL OR i.end_at>=?2))) AS impacts,
+    (SELECT json_group_array(json_object('id',id,'public_id',public_id,'kind',kind,'status',status,'title',title,'body',body,'severity',severity,'starts_at',starts_at,'ends_at',ends_at,'scheduled_start_at',scheduled_start_at,'scheduled_end_at',scheduled_end_at)) FROM (SELECT id,public_id,kind,status,title,body,severity,starts_at,ends_at,scheduled_start_at,scheduled_end_at FROM change WHERE page_id=(SELECT id FROM page WHERE slug=?1) AND (ends_at IS NULL OR ends_at>=?4) ORDER BY starts_at DESC,id DESC LIMIT ?5)) AS changes,
+    (SELECT json_group_array(json_object('change_id',change_id,'component_id',component_id)) FROM (SELECT cc.change_id,cc.component_id FROM change_component cc JOIN change ch ON ch.id=cc.change_id WHERE ch.page_id=(SELECT id FROM page WHERE slug=?1))) AS changeComponents,
+    (SELECT json_group_array(json_object('id',id,'public_id',public_id,'change_id',change_id,'status',status,'body',body,'created_at',created_at)) FROM (SELECT u.id,u.public_id,u.change_id,u.status,u.body,u.created_at FROM change_update u JOIN change ch ON ch.id=u.change_id WHERE ch.page_id=(SELECT id FROM page WHERE slug=?1) ORDER BY u.created_at,u.id)) AS updates,
+    (SELECT json_group_array(json_object('change_update_id',change_update_id,'component_id',component_id)) FROM (SELECT uc.change_update_id,uc.component_id FROM change_update_component uc JOIN change_update u ON u.id=uc.change_update_id JOIN change ch ON ch.id=u.change_id WHERE ch.page_id=(SELECT id FROM page WHERE slug=?1))) AS updateComponents,
+    (SELECT json_group_array(json_object('component_id',component_id,'day',day,'uptime',uptime,'worst_status',worst_status,'covered_seconds',covered_seconds,'unknown_seconds',unknown_seconds,'computed_at',computed_at)) FROM (SELECT u.component_id,u.day,u.uptime,u.worst_status,u.covered_seconds,u.unknown_seconds,u.computed_at FROM daily_uptime u JOIN component c ON c.id=u.component_id WHERE c.page_id=(SELECT id FROM page WHERE slug=?1) AND u.day>=?3 ORDER BY u.day)) AS daily`)
+    .bind(slug, now, historyFloor, changeFloor, MAX_CHANGES)
+    .first<Record<string, string>>();
+  if (!data) throw new Error(`no page with slug ${slug}`);
+  const pageResult = { results: JSON.parse(data.page!) };
+  const sectionsResult = { results: JSON.parse(data.sections!) };
+  const componentsResult = { results: JSON.parse(data.components!) };
+  const probesResult = { results: JSON.parse(data.probes!) };
+  const impactsResult = { results: JSON.parse(data.impacts!) };
+  const changesResult = { results: JSON.parse(data.changes!) };
+  const changeComponentsResult = { results: JSON.parse(data.changeComponents!) };
+  const updatesResult = { results: JSON.parse(data.updates!) };
+  const updateComponentsResult = { results: JSON.parse(data.updateComponents!) };
+  const dailyResult = { results: JSON.parse(data.daily!) };
+
+  const page = pageResult.results[0] as unknown as PageRow | undefined;
+  if (!page) throw new Error(`no page with slug ${slug}`);
 
   const sections = sectionsResult.results as unknown as SectionRow[];
   const components = componentsResult.results as unknown as ComponentRow[];
@@ -468,16 +359,17 @@ export async function buildSnapshot(
       .map((component) => component.publicId),
   }));
 
-  return {
+  return { page, snapshot: {
     slug: page.slug,
     name: page.name,
     snapshotVersion: page.snapshot_version,
     generatedAt: now,
     sourceUpdatedAt: page.updated_at,
+    historyComputedAt: daily.length === 0 ? null : Math.max(...daily.map((row) => row.computed_at)),
     sections: snapshotSections,
     components: snapshotComponents,
     changes: snapshotChanges,
-  };
+  } };
 }
 
 /**
@@ -494,17 +386,31 @@ export async function buildSnapshot(
  */
 export async function writeSnapshot(kv: KVNamespace, snapshot: Snapshot): Promise<void> {
   const body = JSON.stringify(snapshot);
-  await Promise.all([
+  const results = await Promise.allSettled([
     kv.put(freshKey(snapshot.slug), body),
     kv.put(lastKey(snapshot.slug), body),
     writeSnapshotToCache(snapshot),
   ]);
+  const failed = results.find((result) => result.status === "rejected");
+  if (failed?.status === "rejected") throw failed.reason;
+}
+
+export function isSnapshot(value: unknown): value is Snapshot {
+  if (!value || typeof value !== "object") return false;
+  const item = value as Partial<Snapshot>;
+  return typeof item.slug === "string" && typeof item.name === "string" &&
+    typeof item.snapshotVersion === "number" && Number.isFinite(item.snapshotVersion) &&
+    typeof item.generatedAt === "number" && Number.isFinite(item.generatedAt) &&
+    typeof item.sourceUpdatedAt === "number" && Number.isFinite(item.sourceUpdatedAt) &&
+    Array.isArray(item.sections) && Array.isArray(item.components) && Array.isArray(item.changes);
 }
 
 async function readKv(kv: KVNamespace, key: string): Promise<Snapshot | null> {
   const raw = await kv.get(key);
   if (raw === null) return null;
-  return JSON.parse(raw) as Snapshot;
+  const parsed: unknown = JSON.parse(raw);
+  if (!isSnapshot(parsed)) throw new Error("invalid snapshot document");
+  return parsed;
 }
 
 export async function readSnapshot(
@@ -533,29 +439,31 @@ export async function readSnapshot(
     };
   };
 
-  // 1. Normal path: KV only. The snapshot is written synchronously by whatever
-  //    changed the data, so a hit here is current and `stale` is false. What
-  //    this path *cannot* detect is a KV propagation delay; that is documented
-  //    rather than papered over with a timestamp heuristic.
+  // A hot live key is independent from the hour-long failure hedge. Cache age
+  // never changes probe timestamps; readers still derive strict freshness.
+  const hot = await readLiveSnapshotFromCache(slug, now);
+  if (hot) return finish(hot, "cache-live", false);
   try {
-    const cached = await readKv(kv, freshKey(slug));
-    if (cached) return finish(cached, "kv-fresh", false);
-  } catch (error) {
-    errors.push(`kv-fresh: ${describe(error)}`);
-  }
-
-  // 2. KV missed — rebuild from D1 and repopulate both keys.
-  try {
-    const rebuilt = await buildSnapshot(db, slug, { now });
-    try {
-      await writeSnapshot(kv, rebuilt);
-    } catch (error) {
-      // A write failure must not fail the read: we already have the data.
-      errors.push(`kv-write: ${describe(error)}`);
+    const row = await db.prepare("SELECT s.body FROM snapshot_summary s JOIN page p ON p.id=s.page_id WHERE p.slug=?1 AND s.content_revision=p.snapshot_version AND s.live_revision=p.live_revision AND s.urgent_revision=p.urgent_revision")
+      .bind(slug).first<{ body: string }>();
+    if (row) {
+      const live: unknown = JSON.parse(row.body);
+      if (!isSnapshot(live)) throw new Error("invalid live summary document");
+      await Promise.all([writeLiveSnapshotToCache(live, now), writeSnapshotToCache(live)]);
+      return finish(live, "d1-live", false);
     }
+    // Migration/cold miss: READ ONLY assembly. A visitor never repairs KV/D1.
+    const rebuilt = await buildSnapshot(db, slug, { now });
+    await Promise.all([writeLiveSnapshotToCache(rebuilt, now), writeSnapshotToCache(rebuilt)]);
     return finish(rebuilt, "d1-rebuild", false);
   } catch (error) {
     errors.push(`d1-rebuild: ${describe(error)}`);
+  }
+  try {
+    const checkpoint = await readKv(kv, freshKey(slug));
+    if (checkpoint) return finish(checkpoint, "kv-fresh", true);
+  } catch (error) {
+    errors.push(`kv-fresh: ${describe(error)}`);
   }
 
   // 3. D1 unavailable — fall back to the last known good snapshot. This is one of
@@ -597,7 +505,7 @@ export async function bumpSnapshotVersion(
 ): Promise<number> {
   const row = await db
     .prepare(
-      "UPDATE page SET snapshot_version = snapshot_version + 1, updated_at = ?2 WHERE id = ?1 RETURNING snapshot_version",
+      "UPDATE page SET snapshot_version = snapshot_version + 1, live_revision = live_revision + 1, urgent_revision = urgent_revision + 1, updated_at = ?2 WHERE id = ?1 RETURNING snapshot_version",
     )
     .bind(pageId, now)
     .first<{ snapshot_version: number }>();

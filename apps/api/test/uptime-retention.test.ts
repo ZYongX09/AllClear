@@ -499,7 +499,7 @@ describe("applyRetention", () => {
     await env.DB.prepare("DELETE FROM probe_result").run();
   });
 
-  it("rolls the boundary day up before deleting the observations behind it", async () => {
+  it("rolls expired evidence up and preserves the retained boundary predecessor", async () => {
     const page = await createPage();
     const component = await createComponent(page.id, { availableSince: BOUNDARY_START - 86_400 });
     const target = await createProbeTarget(component.id, { intervalSeconds: 300 });
@@ -516,17 +516,15 @@ describe("applyRetention", () => {
     expect(summary.cutoffDay).toBe(BOUNDARY_DAY);
     expect(summary.rollupFailures).toBe(0);
     expect(summary.skippedDeletionReason).toBeUndefined();
-    expect(summary.deleted).toBe(ancient.length);
-
-    // The boundary day has a row, which is what makes the delete safe: without
-    // it the day would report `unknown` forever and look unmeasured.
-    const rolled = await dailyRow(component.id, BOUNDARY_DAY);
+    // The predecessor within gapMax must survive for the retained day's first
+    // covered second; older evidence was sealed before deletion.
+    expect(summary.deleted).toBe(ancient.length - 1);
+    const rolled = await dailyRow(component.id, "2023-10-15");
     expect(rolled).not.toBeNull();
-    expect(rolled!.covered_seconds).toBeGreaterThan(0);
-
-    // And the boundary day's own observations survive.
+    const boundary = await computeDailyUptime(env.DB, component.id, BOUNDARY_DAY, AFTER);
+    expect(boundary!.coveredSeconds).toBe(86_100);
     expect(await resultCountFor(target.id, BOUNDARY_START)).toBe(boundaryObservations.length);
-    expect(await resultCountFor(target.id)).toBe(boundaryObservations.length);
+    expect(await resultCountFor(target.id)).toBe(boundaryObservations.length + 1);
   });
 
   it("deletes nothing when a rollup fails", async () => {

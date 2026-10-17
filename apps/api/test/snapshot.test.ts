@@ -254,13 +254,13 @@ describe("writeSnapshot and the read chain", () => {
     const result = await readSnapshot(brokenDb(), env.SNAPSHOT_KV, page.slug, { now: T0 + 10 });
 
     expect(result.source).toBe("kv-fresh");
-    expect(result.stale).toBe(false);
+    expect(result.stale).toBe(true);
     expect(result.snapshot?.slug).toBe(page.slug);
     expect(result.ageSeconds).toBe(10);
     expect(result.aged).toBe(false);
   });
 
-  it("rebuilds from D1 on a KV miss and repopulates both keys", async () => {
+  it("rebuilds from D1 read-only on a materialization miss", async () => {
     const page = await createPage();
     await createComponent(page.id);
 
@@ -271,7 +271,7 @@ describe("writeSnapshot and the read chain", () => {
     expect(result.snapshot?.components).toHaveLength(1);
 
     // The rebuild is not allowed to leave the fallback key unwritten.
-    expect(await env.SNAPSHOT_KV.get(`snapshot:${page.slug}:last`)).not.toBeNull();
+    expect(await env.SNAPSHOT_KV.get(`snapshot:${page.slug}:last`)).toBeNull();
   });
 
   it("falls back to the last good snapshot and marks the read stale when D1 is down", async () => {
@@ -316,10 +316,10 @@ describe("writeSnapshot and the read chain", () => {
       ageWarningSeconds: 300,
     });
 
-    expect(result.source).toBe("kv-fresh");
+    expect(result.source).toBe("d1-rebuild");
     expect(result.stale).toBe(false);
-    expect(result.ageSeconds).toBe(3600);
-    expect(result.aged).toBe(true);
+    expect(result.ageSeconds).toBe(0);
+    expect(result.aged).toBe(false);
   });
 });
 

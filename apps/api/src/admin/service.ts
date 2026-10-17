@@ -35,7 +35,8 @@
  */
 
 import { ulid } from "../lib/ulid";
-import { buildSnapshot, bumpSnapshotVersion, writeSnapshot } from "../snapshot";
+import { bumpSnapshotVersion } from "../snapshot";
+import { refreshLiveSummary, publishCheckpoint } from "../publication";
 import { ValidationError } from "./validate";
 
 export interface WriteContext {
@@ -117,8 +118,12 @@ async function withPublish<T>(
 export async function publishSnapshot(ctx: WriteContext, slug: string): Promise<number> {
   const page = await requirePage(ctx.db, slug);
   const version = await bumpSnapshotVersion(ctx.db, page.id, ctx.now);
-  const snapshot = await buildSnapshot(ctx.db, slug, { now: ctx.now });
-  await writeSnapshot(ctx.kv, snapshot);
+  await refreshLiveSummary(ctx.db, slug, ctx.now);
+  // D1 refresh is required. KV deferral is not a failed admin mutation.
+  try {
+    const publication = await publishCheckpoint(ctx.db, ctx.kv, slug, ctx.now);
+    if (publication.error) console.warn("admin checkpoint deferred", publication.error);
+  } catch (error) { console.warn("admin checkpoint deferred", String(error)); }
   return version;
 }
 

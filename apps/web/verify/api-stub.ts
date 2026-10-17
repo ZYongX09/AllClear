@@ -72,7 +72,8 @@ function buildFixture(NOW: number): ReadResult {
     slug: "fixture",
     name: "Fixture Service",
     snapshotVersion: 42,
-    generatedAt: NOW - 30,
+    generatedAt: NOW - 10,
+    historyComputedAt: NOW - 240,
     sourceUpdatedAt: NOW - 600,
     sections: [
       {
@@ -220,9 +221,9 @@ function buildFixture(NOW: number): ReadResult {
 
   return {
     snapshot,
-    source: "kv-fresh",
+    source: "d1-live",
     stale: false,
-    ageSeconds: 30,
+    ageSeconds: 10,
     aged: false,
     errors: [],
   };
@@ -251,8 +252,35 @@ export default {
     const admin = await handleAdminRequest(request);
     if (admin !== null) return admin;
 
-    if (pathname === "/api/status/fixture" || pathname === "/api/status/fixture/snapshot.json") {
-      return json(buildFixture(Math.floor(Date.now() / 1000)));
+    // Separate slugs let the public page exercise provenance without forwarding
+    // test-only query parameters through the real API client.
+    const fixture = pathname.match(/^\/api\/status\/(fixture(?:-(?:cached|fallback|legacy|history-unknown|unavailable))?)(?:\/snapshot\.json)?$/);
+    if (fixture) {
+      const slug = fixture[1];
+      const result = buildFixture(Math.floor(Date.now() / 1000));
+      result.snapshot!.slug = slug;
+      if (slug === "fixture-cached") result.source = "cache-live";
+      if (slug === "fixture-fallback") {
+        result.source = "kv-last";
+        result.stale = true;
+        result.ageSeconds = 600;
+        result.aged = true;
+        result.snapshot!.generatedAt -= 590;
+        result.snapshot!.historyComputedAt = result.snapshot!.generatedAt - 300;
+        for (const component of result.snapshot!.components) {
+          if (component.probe) component.probe.lastProbeAt -= 600;
+        }
+      }
+      if (slug === "fixture-legacy") delete result.snapshot!.historyComputedAt;
+      if (slug === "fixture-history-unknown") result.snapshot!.historyComputedAt = null;
+      if (slug === "fixture-unavailable") {
+        result.snapshot = null;
+        result.source = "none";
+        result.stale = true;
+        result.ageSeconds = null;
+        result.aged = false;
+      }
+      return json(result, result.snapshot === null ? 503 : 200);
     }
     if (pathname === "/api/status/fixture/subscribe" && request.method === "POST") {
       return json({ ok: true }, 202);

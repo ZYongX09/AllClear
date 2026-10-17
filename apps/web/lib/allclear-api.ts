@@ -64,9 +64,9 @@ export function readStatus(slug: string): Promise<CallResult<ReadResult>> {
  * Used by the route handlers that exist so a visitor can reach a URL the API
  * Worker owns without the API Worker having a public origin: the Atom feed, the
  * `.json` document, the confirmation link, and the unsubscribe page. Those
- * handlers must not rewrite the response — the status code and `Cache-Control`
- * are part of what the API decided, and a proxy that "helpfully" turned a 410
- * into a 200 would break the confirmation-link expiry.
+ * handlers preserve status and body: a proxy that "helpfully" turned a 410 into
+ * a 200 would break confirmation-link expiry. The public JSON handler explicitly
+ * enforces `no-store` so currency metadata is not cached by another HTTP layer.
  *
  * A binding failure becomes a 502 rather than propagating: a thrown error inside
  * a Next route handler surfaces as an opaque 500 with no indication that the
@@ -119,12 +119,11 @@ export interface RebuildResult {
 }
 
 /**
- * Rebuild a page's snapshot and repopulate both KV keys.
+ * Rebuild a page's D1 summary through the internal repair endpoint.
  *
- * This is the write path the public read path depends on: it is what maintains
- * `snapshot:<slug>:last`, without which the documented fallback would have
- * nothing to fall back to. Admin writes rebuild synchronously on their own, so
- * this is a repair lever rather than part of the normal flow.
+ * Admin writes update the summary server-side; public hot caches can retain a
+ * prior summary for up to 30 seconds. KV checkpoints have an independent budget
+ * and cadence, so this action does not promise immediate global publication.
  */
 export function rebuildSnapshot(slug: string): Promise<CallResult<RebuildResult>> {
   return call<RebuildResult>(`/internal/snapshot/${encodeURIComponent(slug)}/rebuild`, {

@@ -1,6 +1,6 @@
 import { cache } from "react";
 import type { Metadata } from "next";
-import type { Snapshot, SnapshotComponent, SnapshotDay, Status } from "@allclear/shared";
+import type { Snapshot, SnapshotComponent, SnapshotDay, SnapshotSource, Status } from "@allclear/shared";
 import {
   aggregateDayUptime,
   aggregateStatus,
@@ -32,8 +32,8 @@ const HISTORY_DAYS = 90;
  * Not an optimisation setting so much as a correctness one: this page reads
  * `Date.now()` to derive status, and a cached HTML document would keep claiming
  * "operational" after an incident opened. The API's own response is `no-store`
- * for the same reason, and the KV snapshot underneath it is the layer that
- * actually caches.
+ * for the same reason. The API's short-lived summary cache is the caching layer;
+ * the page must not add another freshness window.
  */
 export const dynamic = "force-dynamic";
 
@@ -106,7 +106,7 @@ async function StatusDocument({
   aged,
 }: {
   snapshot: Snapshot;
-  source: string;
+  source: SnapshotSource;
   stale: boolean;
   ageSeconds: number | null;
   aged: boolean;
@@ -178,10 +178,19 @@ async function StatusDocument({
             <span>
               {t("meta.lastUpdated")} <LocalTime epochSeconds={snapshot.generatedAt} mode="relative" />
             </span>
+            <span data-testid="history-updated">
+              {snapshot.historyComputedAt == null ? (
+                t("meta.historyUnknown")
+              ) : (
+                <>{t("meta.historyUpdated")} <LocalTime epochSeconds={snapshot.historyComputedAt} mode="relative" /></>
+              )}
+            </span>
             {aged && ageSeconds !== null ? (
               <span data-testid="aged-note">{t("meta.aged", { age: formatDuration(ageSeconds) })}</span>
             ) : null}
-            <span data-testid="read-source">{t("meta.source", { source })}</span>
+            <span data-testid="read-source" data-source={source}>
+              {t(`meta.sources.${source}`)}
+            </span>
             <span>{t("meta.version", { version: snapshot.snapshotVersion })}</span>
           </div>
 

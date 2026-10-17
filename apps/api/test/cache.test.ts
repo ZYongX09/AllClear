@@ -67,7 +67,7 @@ describe("the colo-local cache", () => {
     expect(cached?.snapshotVersion).toBe(snapshot.snapshotVersion);
   });
 
-  it("never shadows KV, which is the authority for every reader", async () => {
+  it("never lets fallback KV shadow authoritative D1", async () => {
     const page = await createPage();
     await createComponent(page.id);
 
@@ -77,8 +77,8 @@ describe("the colo-local cache", () => {
 
     const result = await readSnapshot(env.DB, env.SNAPSHOT_KV, page.slug, { now: T0 });
 
-    expect(result.source).toBe("kv-fresh");
-    expect(result.snapshot?.name).toBe("fresh from KV");
+    expect(result.source).toBe("d1-rebuild");
+    expect(result.snapshot?.name).toBe("Test Page");
   });
 
   it("never shadows a D1 rebuild, so a KV miss still returns current data", async () => {

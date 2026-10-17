@@ -10,14 +10,21 @@ import { proxyApi } from "@/lib/allclear-api";
  * what "no data" means, and the first consumer to see the two differ would have
  * no way to tell which one was lying.
  *
- * The response is passed through untouched — status code, `Cache-Control` and
- * body — so this route cannot turn the API's 503 into a 200 that a monitor would
- * read as "healthy".
+ * Status and body are preserved, including 503 and fallback provenance. HTTP
+ * caching is disabled here too: a cached ReadResult would freeze its age and
+ * currency indicators beyond the API's own short summary-cache window.
  */
 export async function GET(
   _request: Request,
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params;
-  return proxyApi(`/api/status/${encodeURIComponent(slug)}/snapshot.json`);
+  const response = await proxyApi(`/api/status/${encodeURIComponent(slug)}/snapshot.json`);
+  const headers = new Headers(response.headers);
+  headers.set("Cache-Control", "no-store");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
 }

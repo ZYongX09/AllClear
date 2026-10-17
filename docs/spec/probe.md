@@ -118,11 +118,11 @@ For each due target the scheduler does the following, in order.
    row is still probed — refusing to probe it would hide the provisioning problem
    rather than report it — and its cursor is not advanced.
 
-The scheduler keeps two distinct sets of pages. Uptime is recomputed for every
-component that produced an observation, because even a successful probe changes the
-coverage evidence. A snapshot is republished only for pages where public output
-actually changed, because republishing on every observation would rewrite the KV
-payload once a minute per target for no reason.
+The scheduler separates observations from impact transitions. Every applied
+observation refreshes the page's live summary evidence, including continued
+success without a transition. It does not write KV every minute per target.
+Historical recomputation runs on its own 300-second cadence; fallback KV
+checkpoints are due every 600 seconds and admitted by a shared budget.
 
 ## The four timestamps and the nominal detection lag
 
@@ -161,13 +161,10 @@ cannot raise it above 20: `maxTargetsPerRun` clamps the parsed value to
 `MAX_ENABLED_TARGETS`, and a missing or non-positive value falls back to 20. This
 matches the plan's v1 capacity boundary and the `wrangler.jsonc` default of `"20"`.
 
-It is hard-coded rather than merely configurable because the underlying constraint
-is not a preference. Processing a target costs D1 subrequests within a single
-invocation, and the Free-tier ceiling of fifty read subrequests per invocation is
-what bounds how many targets one tick can process. The
-[data-model](data-model.md) records that this ceiling is still an *estimate* and
-that M3 must measure it; the hard cap is the conservative position until that
-measurement exists.
+The cap is a workload boundary, not proof that twenty targets fit the free tier.
+Measure complete scheduler D1 queries, rows read/written, CPU, subrequests, cache
+misses and checkpoint attempts under healthy and failing workloads. Fewer KV
+writes do not by themselves validate provider allowances or production capacity.
 
 The other v1 boundaries are enforced structurally in the schema
 (`apps/api/migrations/0002_m1_model.sql`), so they cannot be exceeded by
@@ -266,7 +263,7 @@ the request headers are fixed.
 ## Retention of raw results
 
 `probe_result` is append-only and grows with every observation. It is retained for
-`RETENTION_DAYS = 30` and then folded into `daily_uptime` and deleted. The order —
+`RETENTION_DAYS = 30`; the daily retention pass folds them into `daily_uptime` and deletes expired results. The order —
 **roll up, then delete** — is the whole point of `apps/api/src/lib/retention.ts`.
 The boundary day, `now - 30 days`, is rolled up for every component first; the
 delete of everything older is gated on that rollup having succeeded. If any
@@ -288,20 +285,21 @@ the default.
 isolated in its own try/catch, so a failure in one is logged and the rest still run.
 The order is by dependency:
 
-1. `runProbes` — produces the impacts and the observations everything else reads.
-2. `recomputeRecentDays` for each component the run touched — so "today" is never
-   a day behind.
-3. `republishPages` for the pages whose public output changed.
-4. An hourly full sweep of every component (`recomputeAllRecentDays`), gated on
-   `now % 3600 < 60` so it runs once an hour rather than every minute.
-5. `applyRetention` — last among the data steps, because it deletes the raw
-   observations the rollups are computed from.
-6. Rate-limit pruning and the snapshot repair pass.
+The independent cadences are:
 
-Probes come first and retention comes after the rollups for the same reason: the
-rollup must be able to read the raw observations that retention is about to remove.
-A failure in the probe step does not stop retention or the repair pass; a failure
-in retention does not stop rate-limit pruning.
+1. Run due probes on each minute tick; preserve the configured intervals and
+   120-second default freshness budget.
+2. Refresh the D1 materialized summary for applied observations, not just impact
+   transitions. A 30-second hot cache limits read work without extending probe
+   freshness.
+3. Recompute recent daily history every 300 seconds and record its own epoch-second
+   computation time. This is not a recompute of all historical days.
+4. Admit due two-key KV checkpoints every 600 seconds, within the shared budget.
+5. Run retention daily, rolling up the boundary before deleting raw observations;
+   keep raw evidence if the rollup fails. Prune other operational state separately.
+
+No cadence is an observed production latency bound. Scheduling jitter, failures,
+cache placement and checkpoint admission can delay visibility.
 
 ## What this does not claim
 
@@ -316,8 +314,8 @@ in retention does not stop rate-limit pruning.
 * **No authenticated probes.** `auth_ref` is unused; all probes are unauthenticated.
 * **The DNS-rebinding limitation is real.** See above; hostname validation is not a
   solution, and third-party targets would need a dedicated egress design.
-* **The D1 subrequest ceiling is an estimate.** The hard cap of twenty targets per
-  tick is the conservative reading of an unmeasured limit.
+* **Free-tier capacity is unvalidated.** A twenty-target application cap is not
+  evidence of provider quota compliance; validate complete scheduled workloads.
 * **The guard is not claimed to be a complete blocklist.** A blocklist is never
   complete; the tests assert the *shape* of the rule, not the completeness of the
   ranges.

@@ -12,7 +12,8 @@ subsystem.
 
 ## Status
 
-**M0–M5 are built and verified locally. Nothing is deployed.**
+**M0–M5 have local verification records. The low-write pipeline is a local
+change, not a deployment or a production acceptance claim.**
 
 | Milestone | Scope | State |
 | --- | --- | --- |
@@ -23,7 +24,7 @@ subsystem.
 | M4 | Public status page | Done — [`docs/spec/visual-parity.md`](spec/visual-parity.md) |
 | M5 | Subscriptions and unsubscribe | Done — [`docs/spec/subscriptions.md`](spec/subscriptions.md) |
 
-Current gate state, measured rather than assumed:
+Historical M0–M5 gate record (not the current revision’s final gates):
 
 ```sh
 npm run typecheck   # exit 0
@@ -61,7 +62,7 @@ Two Workers plus a shared pure-function package.
                                 │
                     ┌───────────┴───────────┐
                     ▼                       ▼
-                 D1 (source of truth)    KV (published snapshots)
+                 D1 (data + summary)     KV (fallback checkpoints)
 ```
 
 `allclear-api` is deployed with **no public route**. The web Worker reaches it
@@ -138,11 +139,12 @@ are distinct. The nominal detection lag is `(failure_threshold − 1) × interva
 — not one interval. Probe-generated impacts are marked `estimated: true`, and the
 documentation states the error conditions rather than promising a bound.
 
-### The public read path does not require D1
+### Live summary and fallback evidence are distinct
 
-The snapshot is served from KV, falling back to the last known good document,
-and the read reports its own provenance (`source`) and whether it could confirm
-currency (`stale`) — separately from the document's age (`ageSeconds`, `aged`).
+Normal reads use a materialized D1 summary or its 30-second hot-cache copy.
+If the live path fails, KV checkpoints can serve unconfirmed fallback evidence.
+Provenance (`source`) and currency (`stale`) are separate from assembly age
+(`ageSeconds`, `aged`), history computation time and individual probe timestamps.
 
 ### Probes are an admin-reviewed allowlist
 
@@ -152,51 +154,45 @@ No user-submitted probe targets, and redirects are denied by default.
 
 ## The read chain
 
-`readSnapshot` tries five sources in order and reports which one answered:
+The low-write path separates current evidence from historical aggregation and
+outage checkpoints:
 
-| # | `source` | Reached when | `stale` |
-| --- | --- | --- | --- |
-| 1 | `kv-fresh` | The fresh key exists. Touches no D1. | `false` |
-| 2 | `d1-rebuild` | KV missed or failed to parse. Rebuilds from D1 and repopulates both KV keys and the colo-local copy. | `false` |
-| 3 | `kv-last` | D1 is also unavailable. Serves the last known good document. | `true` |
-| 4 | `cache` | KV could not answer at all. Serves the colo-local copy. | `true` |
-| 5 | `none` | Nothing to serve. The caller must render an explicit unavailable state. | `true` |
+| Layer/task | Cadence | Meaning |
+| --- | --- | --- |
+| Probe scheduling | 60 seconds by default | Freshness remains 120 seconds for a default target. |
+| D1 materialized summary | Updated server-side with admin writes and applied observations | Normal read authority; fetched by one point query. |
+| Hot cache | 30 seconds | `cache-live`; a location may retain the prior summary for this lifetime. |
+| Daily history recompute | 300 seconds | Separate from current probe evidence; reports `historyComputedAt` in epoch seconds. |
+| KV fallback checkpoint | 600 seconds when due and admitted by the shared budget | Two keys; not a per-observation or per-read write. |
+| Raw-result retention | Daily | Roll up before deleting; retain evidence when rollup fails. |
 
-Steps 3 and 4 cover **different failures** and neither substitutes for the other:
-`kv-last` covers D1 being unavailable (and is itself in KV), while `cache` covers
-KV being unavailable. The colo-local cache is not a consistency mechanism — it
-helps only the data centre that populated it — and it is documented as such.
+`d1-live` and `cache-live` are normal reads. KV/legacy fallback sources are
+unconfirmed (`stale: true`); `none` means an explicit unavailable view. All
+required `ReadResult` fields stay unchanged. Summary assembly time must not be
+used as a probe timestamp or a claim that all history is fresh.
 
-The consistency target is **about sixty seconds, as an optimisation target and
-not a guaranteed upper bound**. KV exposes no propagation deadline to enforce,
-and the code does not paper over the gap with a timestamp heuristic. Writes are
-published synchronously; the once-a-minute cron pass exists to *repair* a
-snapshot whose version has drifted, not to publish.
-
-**Storage is KV, not R2.** The payload is tens of kilobytes and read on every
-page view; R2's advantages are not exercised at that size, and dual-writing would
-add a second copy to keep in step for no benefit. The rationale is written out in
-[`docs/spec/snapshot.md`](spec/snapshot.md).
-
-### Known publication gap
-
-Source inspection found that the scheduler republishes snapshots for probe-impact
-transitions, but not for every successful observation or rollup update. A snapshot
-whose version still matches can therefore retain old probe evidence and history.
-This has not been reproduced as a runtime scenario; it is an unresolved code-path
-finding, not a freshness guarantee. See the [deployment guide's known
-issues](deployment.en.md#known-issues) for the effect and diagnostic rebuild action.
+Admin writes update the D1 summary immediately server-side, not every global
+cache at once. A hot cache can retain old data for up to 30 seconds; independent
+KV checkpoint budgets can delay fallback publication further. There is no global
+linearizability or cross-location read-after-write promise. The prior
+transition-only publication gap is replaced by refreshing summary evidence for
+successful observations too. See [snapshot.md](spec/snapshot.md) for the contract
+and verification boundaries. Missing/mismatched summaries can require a read-only
+single-SQL assembly; if repair persistently fails and Cache API is unavailable,
+every request can repeat that more expensive work. Public reads write neither
+D1 nor KV, only best-effort cache. Production behavior and free-tier capacity still
+require validation; reduced writes alone do not establish either.
 
 ---
 
 ## Capacity boundaries (v1)
 
-Written into the code as constants rather than made configurable, because these
-are the numbers the deployment was *tested* at:
+Application boundaries are not provider-capacity guarantees. The workload must
+be measured against the intended plan before claiming free-tier support:
 
 | Boundary | Value | Enforced by |
 | --- | --- | --- |
-| Enabled probe targets | 20 | DB constraint, API validator, scheduler cap, console |
+| Probe targets per run | 20 | Scheduler cap; excess due targets can wait |
 | Minimum probe interval | 60 s | DB `CHECK`, API validator |
 | Enabled targets per component | 1 | Partial unique index |
 
@@ -259,13 +255,14 @@ and a failure after counters were updated.
 This project keeps a hard line between **what has been observed** and **what is
 merely designed**. The same rule applies here.
 
-**Verified by running:**
+**Verification records (historical unless noted):**
 
 - `apps/api`: 212 tests across 10 files, against real `workerd` and real D1 —
   including the state machine's concurrency and retry cases, the uptime
   algorithm's overlap and zero-denominator cases, SSRF rejection, the read chain's
   fallback ordering, and the colo-local cache layer.
-- `packages/shared`: 82 tests across 4 files, pure Node.
+- `packages/shared`: 92 tests across 4 files, pure Node, passed for the low-write
+  contract change; its TypeScript build also passed.
 - The status page's functional behaviour: component/section rendering, incident
   expansion, deep links, the subscribe dialog, the calendar/chart toggle, i18n,
   dark mode, and responsive breakpoints down to 375px — all driven in a browser
@@ -278,9 +275,8 @@ merely designed**. The same rule applies here.
 
 **Not verified, and not claimed:**
 
-- **Nothing is deployed.** No Worker is running, no remote migration has been
-  applied, and the production KV/D1 bindings have never been exercised by this
-  code.
+- **No deployment acceptance for this change.** Local checks do not establish
+  production behavior. This optimization does not deploy or enable monitors.
 - **The admin console has no automated tests.** Its session verification, cookie
   attributes and per-action guard are the security boundary for a public write
   surface, and they were checked by hand once. This is the most important gap to
@@ -294,8 +290,8 @@ merely designed**. The same rule applies here.
 - **The visual "dark mode" screenshot artefact is not trustworthy** — the file
   named dark is actually a light render. Dark mode *behaviour* was verified by
   operating the page's own toggle. See `visual-parity.md` §3.
-- **The cron repair pass has no dedicated test.** It was exercised incidentally
-  during M0 and never deliberately since.
+- **Cross-location freshness and real outage behavior remain unmeasured.**
+  Local repair/checkpoint tests do not establish global cache or KV propagation.
 - **KV propagation delay is not simulated.** The D1-failure path is tested with a
   database stand-in that throws; a real cross-colo delay is not reproduced.
 - **`GET /api/status/:slug/history` does not exist.** History is embedded in the
@@ -305,8 +301,8 @@ merely designed**. The same rule applies here.
   candidates were each resolved by hand as non-findings, but the scan never
   reached a complete conclusion, so this project must not be described as
   security-audited. See [`docs/spec/security-scan.md`](spec/security-scan.md).
-- **Migration `0002` is not idempotent** and has never been applied to a
-  production database.
+- **Migration `0002` is not idempotent.** Apply tracked migrations through the
+  migration tool; do not manually replay schema changes.
 
 ---
 
