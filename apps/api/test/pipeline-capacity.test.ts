@@ -1,9 +1,11 @@
-import { deriveSnapshotComponent, type ReadResult } from "@allclear/shared";
+import { deriveSnapshotComponent, startOfUtcDay, utcDay, type ReadResult, type Snapshot } from "@allclear/shared";
 import { createExecutionContext, createScheduledController } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import worker from "../src/index";
-import { computeDailyUptime } from "../src/lib/uptime-recompute";
+import { computeDailyUptime, persistDailyUptime } from "../src/lib/uptime-recompute";
+import { applyProbeObservation } from "../src/probe/transition";
+import { refreshLiveSummary } from "../src/publication";
 import { testEnv as env } from "./env";
 import { createComponent, createPage, createProbeTarget, DAY, workerEnv } from "./helpers";
 
@@ -205,6 +207,269 @@ describe("pipeline capacity", () => {
       queries: Object.entries(counters.queries).sort((a, b) => b[1].rowsRead - a[1].rowsRead).slice(0, 5).map(([sql, count]) => ({ sql: sql.slice(0, 100), ...count })),
     });
   }, 600_000);
+
+  it("keeps disabled targets and retained history within a measured cron-only daily idle budget", async () => {
+    const start = Date.parse("2026-03-10T00:05:20Z") / 1000;
+    const page = await createPage("Disabled capacity acceptance");
+    const components: { id: number; publicId: string }[] = [];
+    for (let index = 0; index < 5; index += 1) {
+      const component = await createComponent(page.id, { availableSince: start - 100 * DAY });
+      components.push(component);
+      const target = await createProbeTarget(component.id, { enabled: false });
+      // Historical import is outside the measured cron workload, as in the
+      // enabled fixture. Preserve a real last-accepted row, not just a timestamp.
+      await env.DB.prepare(`INSERT INTO probe_result
+        (public_id,probe_target_id,observed_at,ok,status_code,latency_ms,created_at)
+        WITH RECURSIVE samples(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM samples WHERE n<1440)
+        SELECT ?1||'-'||n,?2,?3-n*60,1,200,1,?3-n*60 FROM samples`)
+        .bind(`disabled-${target.id}`, target.id, start).run();
+      await env.DB.prepare(`UPDATE probe_state SET last_result_id=?2,last_probe_at=?3,
+        consecutive_successes=1440,transition_seq=1440,updated_at=?3 WHERE probe_target_id=?1`)
+        .bind(target.id, `disabled-${target.id}-1`, start - 60).run();
+      await env.DB.prepare("UPDATE component SET rollup_dirty=0,rollup_dirty_from=NULL WHERE id=?1")
+        .bind(component.id).run();
+      await env.DB.prepare(`INSERT INTO daily_uptime
+        (component_id,day,covered_seconds,unknown_seconds,downtime_weighted,uptime,
+         worst_status,computed_at,archived,rollup_revision)
+        WITH RECURSIVE days(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM days WHERE n<90)
+        SELECT c.id,date(?2-n*86400,'unixepoch'),86400,0,0,1,'operational',?2-n*86400,
+          CASE WHEN n>30 THEN 1 ELSE 0 END,c.rollup_revision
+        FROM days CROSS JOIN component c WHERE c.id=?1`).bind(component.id, start).run();
+    }
+    const accepted = (await env.DB.prepare("SELECT * FROM probe_state ORDER BY probe_target_id").all()).results;
+    const raw = (await env.DB.prepare(`SELECT probe_target_id,COUNT(*) AS n,MAX(observed_at) AS last_at
+      FROM probe_result GROUP BY probe_target_id ORDER BY probe_target_id`).all()).results;
+    const targets = (await env.DB.prepare("SELECT * FROM probe_target ORDER BY id").all()).results;
+    // Capture the exact old-day oracle before midnight retention seals it. The
+    // full-day reader correctly refuses to recompute an already archived day.
+    const archiveOracles = new Map<number, Awaited<ReturnType<typeof computeDailyUptime>>>();
+    for (const component of components) archiveOracles.set(component.id,
+      await computeDailyUptime(env.DB, component.id, utcDay(start - 30 * DAY), start));
+    let now = start;
+    vi.spyOn(Date, "now").mockImplementation(() => now * 1000);
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      throw new Error("a disabled target must never be probed");
+    });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const errors: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => errors.push(args.map(String).join(" ")));
+
+    async function verifyHistory(): Promise<void> {
+      const stored = await env.DB.prepare("SELECT body,history_valid_until FROM snapshot_summary WHERE page_id=?1")
+        .bind(page.id).first<{ body: string; history_valid_until: number }>();
+      expect(stored).not.toBeNull();
+      expect(stored!.history_valid_until).toBe(startOfUtcDay(now) + DAY);
+      const snapshot = JSON.parse(stored!.body) as Snapshot;
+      const days = await env.DB.prepare(`SELECT component_id,day,uptime,worst_status,
+        covered_seconds,unknown_seconds,computed_at,archived FROM daily_uptime
+        WHERE day>=?1 ORDER BY day`).bind(utcDay(now - 89 * DAY)).all<{
+        component_id: number; day: string; uptime: number | null; worst_status: string;
+        covered_seconds: number; unknown_seconds: number; computed_at: number; archived: number;
+      }>();
+      expect(snapshot.components).toHaveLength(5);
+      expect(snapshot.historyComputedAt).toBe(Math.max(...days.results.map((row) => row.computed_at)));
+      for (const component of components) {
+        const publicComponent = snapshot.components.find((row) => row.publicId === component.publicId)!;
+        expect(publicComponent.probe).toBeNull();
+        expect(deriveSnapshotComponent(publicComponent, now).status).toBe("unknown");
+        expect(publicComponent.days).toEqual(days.results.filter((row) => row.component_id === component.id)
+          .map((row) => ({ day: row.day, uptime: row.uptime, status: row.worst_status,
+            coveredSeconds: row.covered_seconds, unknownSeconds: row.unknown_seconds })));
+        // Check the actual materialization times, not an oracle evaluated later.
+        for (const row of days.results.filter((row) => row.component_id === component.id && row.computed_at >= start)) {
+          const exact = row.archived ? archiveOracles.get(component.id)
+            : await computeDailyUptime(env.DB, component.id, row.day, row.computed_at);
+          expect(exact).not.toBeNull();
+          expect(row.covered_seconds).toBe(exact!.coveredSeconds);
+          expect(row.unknown_seconds).toBe(exact!.unknownSeconds);
+          expect(row.uptime).toBe(exact!.uptime);
+          expect(row.worst_status).toBe(exact!.worstStatus);
+        }
+      }
+      expect((await env.DB.prepare("SELECT * FROM probe_state ORDER BY probe_target_id").all()).results).toEqual(accepted);
+      expect((await env.DB.prepare("SELECT * FROM probe_target ORDER BY id").all()).results).toEqual(targets);
+      expect((await env.DB.prepare(`SELECT probe_target_id,COUNT(*) AS n,MAX(observed_at) AS last_at
+        FROM probe_result GROUP BY probe_target_id ORDER BY probe_target_id`).all()).results).toEqual(raw);
+      expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM snapshot_history_dirty").first()).toEqual({ n: 0 });
+      expect(errors).toEqual([]);
+      expect(fetch).not.toHaveBeenCalled();
+    }
+
+    async function measure(ticks: number, from: number) {
+      const counters = usage();
+      const bindings = { ...workerEnv, DB: meteredDatabase(env.DB, counters),
+        SNAPSHOT_KV: meteredKv(env.SNAPSHOT_KV, counters) };
+      const perTick: number[] = [];
+      for (let tick = 0; tick < ticks; tick += 1) {
+        now = from + tick * 60;
+        const before = counters.statements;
+        await worker.scheduled(createScheduledController(), bindings, createExecutionContext());
+        perTick.push(counters.statements - before);
+        expect(errors, `disabled scheduled errors at tick ${tick}`).toEqual([]);
+      }
+      return { ticks, maxStatementsPerTick: Math.max(...perTick), ...counters,
+        queries: Object.entries(counters.queries).sort((a, b) => b[1].rowsRead - a[1].rowsRead)
+          .slice(0, 10).map(([sql, count]) => ({ sql: sql.slice(0, 180), ...count })) };
+    }
+    // No summaries/fragments or completed job cursors exist at cold start. Its
+    // ten-minute work is reported separately, never projected into a daily rate.
+    const cold = await measure(10, start);
+    await verifyHistory();
+    const steady = await measure(1440, start + 600);
+    await verifyHistory();
+    console.info("disabled pipeline capacity evidence", JSON.stringify({ cold, steady }));
+    expect(utcDay(now)).toBe("2026-03-11");
+    expect(steady.rowsRead).toBeLessThanOrEqual(100_000);
+    expect(steady.rowsWritten).toBeLessThanOrEqual(20_000);
+    expect(steady.gets).toBe(0);
+    expect(steady.puts).toBeLessThanOrEqual(292);
+    expect(steady.maxStatementsPerTick).toBeLessThanOrEqual(50);
+  }, 600_000);
+
+  it("drains actual disable revision repairs separately from the steady idle budget", async () => {
+    const start = Date.parse("2026-03-12T12:05:20Z") / 1000;
+    const page = await createPage("Disable repair backlog acceptance");
+    const components: number[] = [];
+    for (let index = 0; index < 5; index += 1) {
+      const component = await createComponent(page.id, { availableSince: start - 100 * DAY });
+      components.push(component.id);
+      const target = await createProbeTarget(component.id, { intervalSeconds: DAY });
+      // The disabled 60s fallback gap must invalidate historical coverage that
+      // was valid with the former daily interval, not just rewrite its revision.
+      for (const [n, at] of [start - 2 * DAY, start - DAY, start - 60].entries()) {
+        expect((await applyProbeObservation(env.DB, { targetId: target.id, observedAt: at,
+          ok: true, resultId: `disable-repair-${target.id}-${n}` })).kind).toBe("applied");
+      }
+      for (let offset = 30; offset >= 1; offset -= 1) {
+        const exact = await computeDailyUptime(env.DB, component.id, utcDay(start - offset * DAY), start);
+        await persistDailyUptime(env.DB, exact!, start);
+      }
+      await env.DB.prepare("UPDATE component SET rollup_dirty=0,rollup_dirty_from=NULL WHERE id=?1")
+        .bind(component.id).run();
+    }
+    await refreshLiveSummary(env.DB, page.slug, start);
+    const revisions = (await env.DB.prepare("SELECT rollup_revision FROM component ORDER BY id").all<{ rollup_revision: number }>()).results;
+    const raw = (await env.DB.prepare("SELECT * FROM probe_result ORDER BY id").all()).results;
+    const accepted = (await env.DB.prepare("SELECT * FROM probe_state ORDER BY probe_target_id").all()).results;
+    const previouslyCovered = await env.DB.prepare("SELECT SUM(covered_seconds) AS n FROM daily_uptime").first<{ n: number }>();
+    expect(previouslyCovered!.n).toBeGreaterThan(0);
+    // The actual mutation fires target_rollup_update; do not clear dirtiness or
+    // rewrite revisions afterward. Setup/import costs are not cron costs.
+    await env.DB.prepare("UPDATE probe_target SET enabled=0").run();
+    expect((await env.DB.prepare("SELECT rollup_revision,rollup_dirty,rollup_dirty_from FROM component ORDER BY id").all()).results)
+      .toEqual(revisions.map((row) => ({ rollup_revision: row.rollup_revision + 1, rollup_dirty: 1, rollup_dirty_from: "0000-01-01" })));
+    let now = start;
+    vi.spyOn(Date, "now").mockImplementation(() => now * 1000);
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => { throw new Error("disabled probe"); });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const counters = usage();
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => counters.errors.push(args.map(String).join(" ")));
+    const bindings = { ...workerEnv, DB: meteredDatabase(env.DB, counters),
+      SNAPSHOT_KV: meteredKv(env.SNAPSHOT_KV, counters) };
+    const perTick: number[] = [];
+    let ticks = 0;
+    for (; ticks < 240; ticks += 1) {
+      now = start + ticks * 60;
+      const before = counters.statements;
+      await worker.scheduled(createScheduledController(), bindings, createExecutionContext());
+      perTick.push(counters.statements - before);
+      expect(counters.errors).toEqual([]);
+      const dirty = await env.DB.prepare("SELECT COUNT(*) AS n FROM component WHERE rollup_dirty=1").first<{ n: number }>();
+      if (dirty!.n === 0) { ticks += 1; break; }
+    }
+    expect(ticks).toBeLessThan(240);
+    const materialized = await env.DB.prepare(`SELECT d.component_id,d.day,d.rollup_revision,d.computed_at,
+      d.covered_seconds,d.unknown_seconds,d.downtime_weighted,d.uptime,d.worst_status,
+      c.rollup_revision AS evidence_revision FROM daily_uptime d JOIN component c ON c.id=d.component_id`)
+      .all<{ component_id: number; day: string; rollup_revision: number; evidence_revision: number;
+        computed_at: number; covered_seconds: number; unknown_seconds: number; downtime_weighted: number;
+        uptime: number | null; worst_status: string }>();
+    expect(materialized.results).toHaveLength(5 * 31);
+    for (const row of materialized.results) {
+      expect(components).toContain(row.component_id);
+      expect(row.rollup_revision).toBe(row.evidence_revision);
+      const exact = await computeDailyUptime(env.DB, row.component_id, row.day, row.computed_at);
+      expect(row.covered_seconds).toBe(exact!.coveredSeconds);
+      expect(row.unknown_seconds).toBe(exact!.unknownSeconds);
+      expect(row.downtime_weighted).toBe(exact!.downtimeWeighted);
+      expect(row.uptime).toBe(exact!.uptime);
+      expect(row.worst_status).toBe(exact!.worstStatus);
+    }
+    expect(materialized.results.every((row) => row.covered_seconds === 0)).toBe(true);
+    expect((await env.DB.prepare("SELECT * FROM probe_state ORDER BY probe_target_id").all()).results).toEqual(accepted);
+    expect((await env.DB.prepare("SELECT * FROM probe_result ORDER BY id").all()).results).toEqual(raw);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(Math.max(...perTick)).toBeLessThanOrEqual(50);
+    expect(counters.gets).toBe(0);
+    console.info("disabled repair backlog capacity evidence", JSON.stringify({ ticks,
+      maxStatementsPerTick: Math.max(...perTick), ...counters,
+      queries: Object.entries(counters.queries).sort((a, b) => b[1].rowsRead - a[1].rowsRead)
+        .slice(0, 5).map(([sql, count]) => ({ sql: sql.slice(0, 180), ...count })) }));
+  }, 180_000);
+
+  it("retries disabled-target retention without losing accepted or predecessor anchors", async () => {
+    const start = Date.parse("2026-04-15T12:05:20Z") / 1000;
+    const cutoff = startOfUtcDay(start) - 30 * DAY;
+    const page = await createPage("Disabled retention retry acceptance");
+    const component = await createComponent(page.id, { availableSince: cutoff - 2 * DAY });
+    const target = await createProbeTarget(component.id, { enabled: false });
+    const samples = [cutoff - DAY + 60, cutoff - DAY + 120, cutoff - 120, cutoff - 60, cutoff + 60];
+    for (const [n, at] of samples.entries()) await env.DB.prepare(`INSERT INTO probe_result
+      (public_id,probe_target_id,observed_at,ok,created_at) VALUES(?1,?2,?3,1,?3)`)
+      .bind(`disabled-retention-${n}`, target.id, at).run();
+    // Keep an accepted row older than the predecessor, proving the two guards
+    // independently. No new accepted observations are allowed during cron.
+    await env.DB.prepare(`UPDATE probe_state SET last_result_id='disabled-retention-0',
+      last_probe_at=?2,updated_at=?2 WHERE probe_target_id=?1`).bind(target.id, samples[0]).run();
+    const accepted = (await env.DB.prepare("SELECT * FROM probe_state").all()).results;
+    const exact = await computeDailyUptime(env.DB, component.id, utcDay(cutoff - DAY), start);
+    await env.DB.prepare("UPDATE maintenance_job SET next_run_at=?1 WHERE job<>'retention'").bind(start + DAY).run();
+    await env.DB.prepare(`CREATE TRIGGER disabled_retention_test_failure BEFORE DELETE ON probe_result
+      BEGIN SELECT RAISE(ABORT,'injected disabled purge failure'); END`).run();
+    let now = start;
+    vi.spyOn(Date, "now").mockImplementation(() => now * 1000);
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => { throw new Error("disabled probe"); });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const errors: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => errors.push(args.map(String).join(" ")));
+    const counters = usage();
+    const bindings = { ...workerEnv, DB: meteredDatabase(env.DB, counters),
+      SNAPSHOT_KV: meteredKv(env.SNAPSHOT_KV, counters) };
+    try {
+      await worker.scheduled(createScheduledController(), bindings, createExecutionContext());
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toContain("injected disabled purge failure");
+      expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM daily_uptime WHERE archived=1").first()).toEqual({ n: 0 });
+      expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM probe_result").first()).toEqual({ n: 5 });
+      expect(await env.DB.prepare("SELECT failures,next_run_at,lease_until FROM maintenance_job WHERE job='retention'").first())
+        .toEqual({ failures: 1, next_run_at: start + 60, lease_until: 0 });
+    } finally { await env.DB.prepare("DROP TRIGGER disabled_retention_test_failure").run(); }
+    errors.length = 0;
+    now = start + 59;
+    await worker.scheduled(createScheduledController(), bindings, createExecutionContext());
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM probe_result").first()).toEqual({ n: 5 });
+    now = start + 60;
+    await worker.scheduled(createScheduledController(), bindings, createExecutionContext());
+    expect(await env.DB.prepare(`SELECT covered_seconds,unknown_seconds,downtime_weighted,
+      uptime,worst_status,archived FROM daily_uptime WHERE component_id=?1 AND day=?2`)
+      .bind(component.id, exact!.day).first()).toEqual({ covered_seconds: exact!.coveredSeconds,
+        unknown_seconds: exact!.unknownSeconds, downtime_weighted: exact!.downtimeWeighted,
+        uptime: exact!.uptime, worst_status: exact!.worstStatus, archived: 1 });
+    expect((await env.DB.prepare("SELECT public_id FROM probe_result ORDER BY observed_at").all()).results)
+      .toEqual([{ public_id: "disabled-retention-0" }, { public_id: "disabled-retention-3" }, { public_id: "disabled-retention-4" }]);
+    // Preserved predecessor still brackets midnight with the retained successor.
+    expect((await computeDailyUptime(env.DB, component.id, utcDay(cutoff), now))!.coveredSeconds).toBe(60);
+    now = start + 120;
+    await worker.scheduled(createScheduledController(), bindings, createExecutionContext());
+    expect(await env.DB.prepare("SELECT failures,completed_day,next_run_at FROM maintenance_job WHERE job='retention'").first())
+      .toEqual({ failures: 0, completed_day: utcDay(start), next_run_at: startOfUtcDay(start) + DAY });
+    expect((await env.DB.prepare("SELECT * FROM probe_state").all()).results).toEqual(accepted);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM probe_result WHERE observed_at>=?1").bind(start).first()).toEqual({ n: 0 });
+    expect(errors).toEqual([]);
+    expect(fetch).not.toHaveBeenCalled();
+    console.info("disabled retention retry evidence", JSON.stringify({ ticks: 4, ...counters,
+      note: "failed D1 batch has no returned meta; successful statements only, not a daily budget measurement" }));
+  });
 
   it("keeps simultaneous failures, confirmed outages, and recovery within the invocation limit", async () => {
     const start = Math.floor(Date.parse("2026-02-03T23:56:20Z") / 1000);

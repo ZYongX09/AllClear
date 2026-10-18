@@ -12,7 +12,7 @@ npm run build     # builds packages/shared, then apps/web
 | Suite | Files | Tests | Runs against |
 |---|---|---|---|
 | `packages/shared` | 4 | 92 | plain Node |
-| `apps/api` | 15 | 266 | real `workerd` with a real D1 binding, including 3 capacity scenarios |
+| `apps/api` | 15 | 269 | real `workerd` with a real D1 binding, including 6 capacity scenarios |
 | `apps/web` | — | — | no suite yet; see below |
 
 ### `packages/shared` must be built before anything imports it
@@ -154,10 +154,124 @@ read 2,405,044 rows in its daily fixture. The new, more populated fixture reduce
 that measured read count by 83.6%; writes increase modestly for invalidation and
 history-cache bookkeeping. This is a read/write trade, not zero-cost monitoring.
 
-These are local regression workload measurements, not a production billing
-forecast or an account-wide Free-tier guarantee. Visitors, retries, more pages,
-incident history, additional services, and runtime query plans can add work.
-The full-day test has an explicit 600-second test timeout; run the capacity file
+#### Disabled / cron-only idle budget (local verification, 2026-10-18)
+
+The same-HEAD baseline at `9e6995032ef68d22782318f17059fc0c7a499ba7`
+passed **92 shared tests and 266 API tests** before any edits. Dependencies were
+installed with each package's own `npm ci` in the independent worktree; no
+production `node_modules` link was reused. The three new API cases bring the
+API suite to **269 tests**, with no production code, schema, dependency or cron
+configuration change: measurement of the existing implementation met the idle
+gate, so adding an early return or another scheduling mechanism was unnecessary.
+
+The idle fixture has one page, five components and five **disabled** targets,
+1,440 preceding minute observations per target and ninety seeded daily aggregates
+per component. Import and aggregate creation occur before metering. As in the
+healthy fixture, imported rollup dirtiness is cleared and seeded aggregate
+revisions match the evidence revision. That represents **steady, already repaired
+state**, not the cost of disabling a real target; the latter has its own case.
+Last-accepted result ids/timestamps and complete target/state rows are retained.
+No summaries, history fragments or completed maintenance cursors exist at cold
+start.
+
+| Workload / measured window | Ticks | D1 rows read | D1 rows written | KV puts / gets | Max SQL / tick |
+|---|---:|---:|---:|---:|---:|
+| Disabled cold initialization, first ten minutes | 10 | 18,297 | 535 | 2 / 0 | 18 |
+| Disabled steady cron-only, **24h crossing UTC midnight** after initialization | 1,440 | **81,669** | **7,421** | **288 / 0** | 18 |
+| Actual enabled → disabled historical repair backlog | 197 | 24,844 | 2,447 | 40 / 0 | 18 |
+| Existing five-enabled healthy 24h regression | 1,440 | 393,543 | 66,616 | 288 / 0 | 38 |
+
+**The local steady idle measurement does not exceed either requested limit:**
+`rows_read <= 100,000/day` and `rows_written <= 20,000/day`. Its headroom is
+18,331 reads and 12,579 writes, not an account-wide allowance. Cold initialization
+and the one-off repair backlog are reported as observed windows, **not** projected
+to daily rates and not subtracted silently from a whole-day total. KV writes are
+not zero: the existing checkpoint publisher still attempts 288 puts per steady
+24h even with no enabled probes.
+
+The idle case spies on fetch (zero calls), checks unchanged raw per-target
+counts/latest timestamps and full accepted/target state, compares the stored
+snapshot's complete retained history with D1 before and after midnight, verifies
+the moving ninety-day floor and history computation watermark, and compares newly
+materialized aggregates with the full-day oracle at their actual computation
+times. An archived day's oracle is captured **before** sealing, because the
+full-day reader correctly refuses to recompute sealed history. These verification
+queries are unmetered, as are fixture writes; only actual scheduled invocations
+contribute to the capacity totals. Today/finalize/retention/history repair and
+checkpoint work still run; no `0 enabled` whole-cron bypass was introduced.
+
+Measured steady read hotspots were the daily-uptime UPSERT and its trigger work
+(18,830), the persisted maintenance claim (16,138), and historical probe reads
+(13,852). The cold probe reads cost 14,525 rows. These numbers include actual
+returned D1 metadata, not estimates from SQL statement counts. Since the measured
+steady total is below the gate, this change deliberately does **not** optimize
+those paths or alter their correctness contracts.
+
+The separate backlog case first materializes thirty retained days for five
+**enabled daily-interval** targets using real accepted observations, then executes
+an actual `UPDATE probe_target SET enabled=0`. It does not clear the resulting
+revision increment or `rollup_dirty` cursor. The existing bounded repair drains
+all five components (155 component-days including today) in 197 minute ticks,
+without new HTTP probes or raw samples. Every repaired row matches its new
+revision and exact oracle; previously bracketed daily-interval coverage becomes
+unknown under the disabled component's default gap. This is one deliberately
+populated backlog, not a bound for arbitrary accumulated history.
+
+A disabled-target retention case injects a real SQLite delete-trigger failure
+inside seal+purge. The cron preserves all five raw rows and rolls back the
+archive, persists a 60-second retry, does nothing at +59s, and then retries,
+archives the exact aggregate and deletes two expired non-anchor rows. The old
+accepted observation and a **different** midnight predecessor both survive, along
+with the retained successor; the successor still brackets 60 seconds across
+midnight. Completion clears failures and schedules the next UTC day. Only 192
+read/22 written rows are returned by **successful** statements over its four
+invocations: the failed D1 batch returns no meta, so these partial counters are
+**not** a complete failure cost or a daily capacity claim.
+
+Reproduction commands from the repository root (local tests only):
+
+```sh
+npm --prefix packages/shared ci
+npm --prefix packages/shared run build
+npm --prefix packages/shared test
+npm --prefix apps/api ci
+npm --prefix apps/api test  # same-HEAD baseline, before the new tests
+
+npm --prefix apps/api test -- test/pipeline-capacity.test.ts -t 'keeps disabled targets'
+npm --prefix apps/api test -- test/pipeline-capacity.test.ts -t 'drains actual disable|retries disabled-target'
+
+npm --prefix packages/shared run build
+npm --prefix packages/shared run typecheck
+WRANGLER_SEND_METRICS=false npm --prefix apps/api run typecheck
+npm --prefix packages/shared test
+npm --prefix apps/api test  # all 269, including all six capacity cases
+```
+
+Run-local command/exit/timestamp manifests and stdout/stderr were saved outside
+the repository under `/tmp/allclear-d1-idle-budget-20261018/`:
+`baseline-manifest.log`, `baseline-shared-{ci,build,test}.log`,
+`baseline-api-{ci,test}.log`, `commands.log`,
+`disabled-before-oracle-fixed.log`, `disabled-specialists.log`,
+`final-shared-{build,typecheck,test}.log`, `final-api-{typecheck,test}.log`.
+The first exploratory disabled run (`disabled-before.log`) failed only because
+the new assertion tried to recompute an already sealed day; the fixture now
+captures that oracle before archival and the failed log is retained. This was
+not a runtime budget failure. `/tmp` is ephemeral; preserve these logs separately
+if durable review evidence is needed.
+
+**Verification / delivery boundary:** these are local workerd regression workload
+measurements, not a production billing forecast or an account-wide Free-tier
+guarantee. They do not cover visitor/admin traffic, a restored production data
+shape, multiple pages, arbitrary incident history/backlog, all isolate locations,
+real KV failures or production query plans. No secret files were read, no remote
+D1 was queried or migrated, no production target was restored or changed, and no
+cron was paused or application deployed. Existing `main` code or a migration file
+being present in Git does **not** prove it is applied in production. The reviewed
+tests and evidence are delivered through `develop`; production rollout and
+monitoring restoration require separate authorization, and production behavior
+remains unverified.
+The frontend was not changed or built/type-checked in this API-only task.
+The full-day cases have explicit 600-second test timeouts; run the capacity file
 separately when iterating on faster suites.
 
 ## `apps/web` — no suite yet
